@@ -179,6 +179,170 @@ index 15dc3cbfd..fb4c99d69 100644
  		"oss":        func(enc encryption.StateEncryption) backend.Backend { return backendOSS.New(enc) },
  		"pg":         func(enc encryption.StateEncryption) backend.Backend { return backendPg.New(enc) },
  		"s3":         func(enc encryption.StateEncryption) backend.Backend { return backendS3.New(enc) },
+diff --git a/internal/backend/remote-state/oras/assistant.go b/internal/backend/remote-state/oras/assistant.go
+new file mode 100644
+index 000000000..90f38b718
+--- /dev/null
++++ b/internal/backend/remote-state/oras/assistant.go
+@@ -0,0 +1,87 @@
++package oras
++
++import (
++	"fmt"
++	"net/url"
++	"strings"
++
++	orasRegistry "oras.land/oras-go/v2/registry"
++)
++
++// InferRepository derives a GHCR state repository from a GitHub origin URL and
++// the module's path inside the repository. Only origin URLs whose host is
++// exactly github.com are recognized.
++func InferRepository(origin, modulePrefix string) (string, bool) {
++	origin = strings.TrimSpace(origin)
++	if origin == "" {
++		return "", false
++	}
++
++	var host, repositoryPath string
++	if strings.HasPrefix(origin, "git@") {
++		rest := strings.TrimPrefix(origin, "git@")
++		index := strings.IndexByte(rest, ':')
++		if index < 0 {
++			return "", false
++		}
++		host, repositoryPath = rest[:index], rest[index+1:]
++	} else {
++		parsed, err := url.Parse(origin)
++		if err != nil {
++			return "", false
++		}
++		switch parsed.Scheme {
++		case "https":
++			if parsed.User != nil {
++				return "", false
++			}
++		case "ssh":
++			if parsed.User == nil || parsed.User.Username() != "git" {
++				return "", false
++			}
++		default:
++			return "", false
++		}
++		host, repositoryPath = parsed.Hostname(), parsed.Path
++	}
++	if !strings.EqualFold(host, "github.com") {
++		return "", false
++	}
++
++	repositoryPath = strings.Trim(strings.TrimSuffix(strings.Trim(repositoryPath, "/"), ".git"), "/")
++	parts := strings.Split(repositoryPath, "/")
++	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
++		return "", false
++	}
++
++	repository := fmt.Sprintf("ghcr.io/%s/%s-tfstate", strings.ToLower(parts[0]), strings.ToLower(parts[1]))
++	if prefix := strings.ToLower(strings.Trim(strings.ReplaceAll(modulePrefix, "\\", "/"), "/")); prefix != "" {
++		repository += "/" + prefix
++	}
++	if err := ValidateRepository(repository); err != nil {
++		return "", false
++	}
++	return repository, true
++}
++
++// ValidateRepository accepts an OCI repository reference without a tag or digest.
++func ValidateRepository(repository string) error {
++	_, err := parseRepository(repository)
++	return err
++}
++
++func parseRepository(repository string) (orasRegistry.Reference, error) {
++	ref, err := orasRegistry.ParseReference(repository)
++	if err != nil {
++		return ref, err
++	}
++	// ParseReference accepts empty tag and digest suffixes such as "state:"
++	// and "state@". A colon after the last slash starts a tag; any @ starts a
++	// digest. Reject both while leaving registry ports, which precede the
++	// first slash, alone.
++	if ref.Reference != "" || strings.Contains(repository, "@") ||
++		strings.LastIndexByte(repository, ':') > strings.LastIndexByte(repository, '/') {
++		return ref, fmt.Errorf("repository must not include a tag or digest")
++	}
++	return ref, nil
++}
+diff --git a/internal/backend/remote-state/oras/assistant_test.go b/internal/backend/remote-state/oras/assistant_test.go
+new file mode 100644
+index 000000000..b0cd7567e
+--- /dev/null
++++ b/internal/backend/remote-state/oras/assistant_test.go
+@@ -0,0 +1,65 @@
++package oras
++
++import "testing"
++
++func TestInferRepository(t *testing.T) {
++	tests := []struct {
++		name   string
++		origin string
++		prefix string
++		want   string
++		ok     bool
++	}{
++		{"https with git suffix", "https://github.com/Org/Repo.git", "", "ghcr.io/org/repo-tfstate", true},
++		{"https without suffix", "https://github.com/org/repo", "", "ghcr.io/org/repo-tfstate", true},
++		{"https trailing slash", "https://github.com/org/repo.git/", "", "ghcr.io/org/repo-tfstate", true},
++		{"ssh url", "ssh://git@github.com/org/repo.git", "", "ghcr.io/org/repo-tfstate", true},
++		{"scp style", "git@github.com:org/repo.git", "", "ghcr.io/org/repo-tfstate", true},
++		{"module subdirectory", "https://github.com/org/repo.git", "modules/network/", "ghcr.io/org/repo-tfstate/modules/network", true},
++		{"uppercase prefix", "git@github.com:org/repo.git", "Infra/", "ghcr.io/org/repo-tfstate/infra", true},
++		{"subdomain", "https://www.github.com/org/repo.git", "", "", false},
++		{"lookalike host", "https://github.com.example.com/org/repo.git", "", "", false},
++		{"enterprise host", "git@github.example.com:org/repo.git", "", "", false},
++		{"http origin", "http://github.com/org/repo.git", "", "", false},
++		{"git scheme", "git://github.com/org/repo.git", "", "", false},
++		{"wrong ssh user", "ssh://root@github.com/org/repo.git", "", "", false},
++		{"https credentials", "https://user@github.com/org/repo.git", "", "", false},
++		{"extra path", "https://github.com/org/repo/tree/main", "", "", false},
++		{"missing repository", "https://github.com/org", "", "", false},
++		{"empty origin", "", "", "", false},
++	}
++	for _, tc := range tests {
++		t.Run(tc.name, func(t *testing.T) {
++			got, ok := InferRepository(tc.origin, tc.prefix)
++			if got != tc.want || ok != tc.ok {
++				t.Fatalf("InferRepository(%q, %q) = %q, %v; want %q, %v", tc.origin, tc.prefix, got, ok, tc.want, tc.ok)
++			}
++		})
++	}
++}
++
++func TestValidateRepository(t *testing.T) {
++	for _, repository := range []string{
++		"ghcr.io/org/state",
++		"ghcr.io/org/state/modules/network",
++		"127.0.0.1:5000/ns/state",
++		"ghcr.io:5000/org/state",
++	} {
++		if err := ValidateRepository(repository); err != nil {
++			t.Errorf("ValidateRepository(%q) = %v, want nil", repository, err)
++		}
++	}
++	for _, repository := range []string{
++		"",
++		"ghcr.io/org/state:",
++		"ghcr.io/org/state@",
++		"ghcr.io/org/state:tag@",
++		"ghcr.io/org/state:latest",
++		"ghcr.io/org/state@sha256:abc",
++		"not a repository",
++	} {
++		if err := ValidateRepository(repository); err == nil {
++			t.Errorf("ValidateRepository(%q) = nil, want error", repository)
++		}
++	}
++}
 diff --git a/internal/backend/remote-state/oras/auth_exchange_test.go b/internal/backend/remote-state/oras/auth_exchange_test.go
 new file mode 100644
 index 000000000..56c2d66ce
@@ -468,10 +632,10 @@ index 000000000..56c2d66ce
 +}
 diff --git a/internal/backend/remote-state/oras/backend.go b/internal/backend/remote-state/oras/backend.go
 new file mode 100644
-index 000000000..0d8e265ac
+index 000000000..1d0005e36
 --- /dev/null
 +++ b/internal/backend/remote-state/oras/backend.go
-@@ -0,0 +1,429 @@
+@@ -0,0 +1,425 @@
 +package oras
 +
 +import (
@@ -497,7 +661,6 @@ index 000000000..0d8e265ac
 +	"github.com/opentofu/opentofu/internal/states/statemgr"
 +	"github.com/opentofu/opentofu/version"
 +
-+	orasRegistry "oras.land/oras-go/v2/registry"
 +	orasRemote "oras.land/oras-go/v2/registry/remote"
 +	orasAuth "oras.land/oras-go/v2/registry/remote/auth"
 +)
@@ -621,12 +784,9 @@ index 000000000..0d8e265ac
 +		return fmt.Errorf("repository must not be empty; set it in the backend block")
 +	}
 +
-+	ref, err := orasRegistry.ParseReference(repository)
++	ref, err := parseRepository(repository)
 +	if err != nil {
 +		return err
-+	}
-+	if ref.Reference != "" {
-+		return fmt.Errorf("repository must not include a tag or digest")
 +	}
 +
 +	insecure := data.Get("insecure").(bool)
@@ -2450,7 +2610,7 @@ index 000000000..bb99faeb6
 +	return 1
 +}
 diff --git a/internal/command/init.go b/internal/command/init.go
-index 0d98d551a..5a3549cb6 100644
+index 0d98d551a..aabf0db3e 100644
 --- a/internal/command/init.go
 +++ b/internal/command/init.go
 @@ -21,6 +21,7 @@ import (
@@ -2461,7 +2621,49 @@ index 0d98d551a..5a3549cb6 100644
  	"github.com/opentofu/opentofu/internal/cloud"
  	"github.com/opentofu/opentofu/internal/command/arguments"
  	"github.com/opentofu/opentofu/internal/command/flags"
-@@ -515,6 +516,12 @@ func (c *InitCommand) initBackend(ctx context.Context, root *configs.Module, ext
+@@ -73,8 +74,14 @@ type InitCommand struct {
+ func (c *InitCommand) Run(rawArgs []string) int {
+ 	return RunCommand(InitCommander(), c.Meta, rawArgs)
+ }
+-func (c InitCommand) Execute(args *arguments.Init, view views.Init) int {
++func (c InitCommand) Execute(args *arguments.Init, view views.Init) (code int) {
+ 	var diags tfdiags.Diagnostics
++	// Register once at entry so no failure return, including the config reload
++	// immediately after setup, can leave a generated file without a warning.
++	var generatedORASConfig string
++	defer func() {
++		emitGeneratedORASConfigWarning(view, generatedORASConfig, code)
++	}()
+ 
+ 	ctx := c.CommandContext()
+ 	ctx, span := tracing.Tracer().Start(ctx, "Init")
+@@ -208,6 +215,25 @@ To initialize the configuration already in this working directory, omit the
+ 		return 1
+ 	}
+ 
++	if orasSetupAllowed(args, c.Input(), c.View.StdinPiped(), c.SystemCfg.RunningInAutomation) {
++		var setupDiags tfdiags.Diagnostics
++		generatedORASConfig, setupDiags = c.maybeSetupORASBackend(ctx, path, rootModEarly)
++		diags = diags.Append(setupDiags)
++		if setupDiags.HasErrors() {
++			view.Diagnostics(diags)
++			return 1
++		}
++		if generatedORASConfig != "" {
++			rootModEarly, earlyConfDiags = c.loadSingleModuleWithTests(ctx, path, args.TestsDirectory)
++			if earlyConfDiags.HasErrors() {
++				view.ConfigError()
++				diags = diags.Append(earlyConfDiags)
++				view.Diagnostics(diags)
++				return 1
++			}
++		}
++	}
++
+ 	var enc encryption.Encryption
+ 	// If backend flag is explicitly set to false i.e -backend=false, we disable state and plan encryption
+ 	if args.BackendFlagSet && !args.FlagBackend {
+@@ -515,6 +541,12 @@ func (c *InitCommand) initBackend(ctx context.Context, root *configs.Module, ext
  		if overrideDiags.HasErrors() {
  			return nil, true, diags
  		}
@@ -2474,6 +2676,526 @@ index 0d98d551a..5a3549cb6 100644
  	} else {
  		// If the user supplied a -backend-config on the CLI but no backend
  		// block was found in the configuration, it's likely - but not
+diff --git a/internal/command/init_oras_assistant.go b/internal/command/init_oras_assistant.go
+new file mode 100644
+index 000000000..d3f084907
+--- /dev/null
++++ b/internal/command/init_oras_assistant.go
+@@ -0,0 +1,169 @@
++package command
++
++import (
++	"context"
++	"errors"
++	"fmt"
++	"io/fs"
++	"os"
++	"os/exec"
++	"path/filepath"
++	"strings"
++
++	backendORAS "github.com/opentofu/opentofu/internal/backend/remote-state/oras"
++	"github.com/opentofu/opentofu/internal/command/arguments"
++	"github.com/opentofu/opentofu/internal/command/views"
++	"github.com/opentofu/opentofu/internal/configs"
++	"github.com/opentofu/opentofu/internal/tfdiags"
++	"github.com/opentofu/opentofu/internal/tofu"
++)
++
++// orasSetupAllowed reports whether the first-run ORAS backend assistant may
++// run. It is limited to human interactive init calls and skips every case where
++// prompting or writing a configuration file would be surprising.
++func orasSetupAllowed(args *arguments.Init, input, stdinPiped, automation bool) bool {
++	return args.FlagBackend &&
++		args.View.ViewType == arguments.ViewHuman &&
++		input && !stdinPiped && !automation &&
++		len(args.FlagConfigExtra.AllItems()) == 0 &&
++		!args.Backend.ForceInitCopy
++}
++
++// maybeSetupORASBackend offers the ORAS backend when the root module has no
++// backend or cloud block. It returns the path of a generated configuration file,
++// or an empty string when the user declined.
++func (c *InitCommand) maybeSetupORASBackend(ctx context.Context, dir string, root *configs.Module) (string, tfdiags.Diagnostics) {
++	var diags tfdiags.Diagnostics
++	if root.Backend != nil || root.CloudConfig != nil {
++		return "", diags
++	}
++
++	inferred := ""
++	if origin, ok := gitRemoteOrigin(ctx, dir); ok {
++		prefix := ""
++		if value, ok := gitModulePrefix(ctx, dir); ok {
++			prefix = value
++		}
++		inferred, _ = backendORAS.InferRepository(origin, prefix)
++	}
++
++	answer, err := c.UIInput().Input(ctx, &tofu.InputOpts{
++		Id:          "oras-backend-setup",
++		Query:       "Set up the gh-tofu ORAS backend?",
++		Description: "No backend is configured. gh-tofu can store state in GitHub Container Registry (GHCR).\n\nOpenTofu migrates any existing local state with its normal confirmation prompt.",
++		Default:     "no",
++	})
++	if err != nil {
++		diags = diags.Append(tfdiags.Sourceless(tfdiags.Error, "Failed to read the ORAS backend setup answer", err.Error()))
++		return "", diags
++	}
++	switch strings.ToLower(strings.TrimSpace(answer)) {
++	case "yes", "y":
++	default:
++		return "", diags
++	}
++
++	location, err := c.UIInput().Input(ctx, orasRepositoryPrompt(inferred))
++	if err != nil {
++		diags = diags.Append(tfdiags.Sourceless(tfdiags.Error, "Failed to read the ORAS repository", err.Error()))
++		return "", diags
++	}
++	location = strings.TrimSpace(location)
++	if location == "" {
++		diags = diags.Append(tfdiags.Sourceless(tfdiags.Error, "Invalid ORAS repository",
++			"No repository was entered. Enter <registry>/<repository> without a tag or digest."))
++		return "", diags
++	}
++	if err := backendORAS.ValidateRepository(location); err != nil {
++		diags = diags.Append(tfdiags.Sourceless(tfdiags.Error, "Invalid ORAS repository",
++			fmt.Sprintf("%q is not a valid OCI repository: %s", location, err)))
++		return "", diags
++	}
++
++	path, err := writeORASBackendConfig(dir, location)
++	if err != nil {
++		diags = diags.Append(tfdiags.Sourceless(tfdiags.Error, "Could not write the ORAS backend configuration", err.Error()))
++		return "", diags
++	}
++	return path, diags
++}
++
++func orasRepositoryPrompt(inferred string) *tofu.InputOpts {
++	description := "Enter <registry>/<repository> without a tag or digest."
++	if inferred != "" {
++		description = "Press Enter to accept the suggested repository, or edit it.\nThe repository must not include a tag or digest."
++	}
++	return &tofu.InputOpts{
++		Id:          "oras-backend-repository",
++		Query:       "ORAS backend repository",
++		Description: description,
++		Default:     inferred,
++	}
++}
++
++// writeORASBackendConfig creates a new backend configuration file without
++// overwriting any existing file, trying deterministic names in order.
++func writeORASBackendConfig(dir, repository string) (string, error) {
++	for i := 0; ; i++ {
++		name := "backend.tf"
++		switch {
++		case i == 1:
++			name = "backend.gh-tofu.tf"
++		case i > 1:
++			name = fmt.Sprintf("backend.gh-tofu-%d.tf", i)
++		}
++		path := filepath.Join(dir, name)
++		file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
++		if errors.Is(err, fs.ErrExist) {
++			continue
++		}
++		if err != nil {
++			return "", err
++		}
++		_, writeErr := fmt.Fprintf(file, "terraform {\n  backend \"oras\" {\n    repository = %q\n  }\n}\n", repository)
++		closeErr := file.Close()
++		if writeErr != nil || closeErr != nil {
++			_ = os.Remove(path)
++			if writeErr != nil {
++				return "", writeErr
++			}
++			return "", closeErr
++		}
++		return path, nil
++	}
++}
++
++func gitRemoteOrigin(ctx context.Context, dir string) (string, bool) {
++	out, err := exec.CommandContext(ctx, "git", "-C", dir, "remote", "get-url", "origin").Output()
++	if err != nil {
++		return "", false
++	}
++	return strings.TrimSpace(string(out)), true
++}
++
++func gitModulePrefix(ctx context.Context, dir string) (string, bool) {
++	out, err := exec.CommandContext(ctx, "git", "-C", dir, "rev-parse", "--show-prefix").Output()
++	if err != nil {
++		return "", false
++	}
++	return strings.TrimSpace(string(out)), true
++}
++
++func orasConfigKeptWarning(path string) tfdiags.Diagnostic {
++	return tfdiags.Sourceless(tfdiags.Warning,
++		"Generated ORAS backend configuration was kept",
++		fmt.Sprintf("Initialization did not complete, but %s was kept. Fix the error above and run \"gh tofu init\" again. OpenTofu handles state migration and confirmation natively.", path))
++}
++
++func generatedORASConfigWarning(path string, code int) tfdiags.Diagnostics {
++	if path == "" || code == 0 {
++		return nil
++	}
++	return tfdiags.Diagnostics{orasConfigKeptWarning(path)}
++}
++
++func emitGeneratedORASConfigWarning(view views.Init, path string, code int) {
++	if warning := generatedORASConfigWarning(path, code); len(warning) != 0 {
++		view.Diagnostics(warning)
++	}
++}
+diff --git a/internal/command/init_oras_assistant_test.go b/internal/command/init_oras_assistant_test.go
+new file mode 100644
+index 000000000..cad979cbc
+--- /dev/null
++++ b/internal/command/init_oras_assistant_test.go
+@@ -0,0 +1,339 @@
++package command
++
++import (
++	"context"
++	"os"
++	"os/exec"
++	"path/filepath"
++	"strings"
++	"testing"
++
++	"github.com/opentofu/opentofu/internal/command/arguments"
++	"github.com/opentofu/opentofu/internal/command/flags"
++	"github.com/opentofu/opentofu/internal/command/views"
++	"github.com/opentofu/opentofu/internal/command/workdir"
++	"github.com/opentofu/opentofu/internal/configs"
++	"github.com/opentofu/opentofu/internal/tfdiags"
++)
++
++type recordingInitView struct {
++	views.Init
++	diagnostics []tfdiags.Diagnostics
++}
++
++func (v *recordingInitView) Diagnostics(diags tfdiags.Diagnostics) {
++	v.diagnostics = append(v.diagnostics, diags)
++}
++
++func TestORASSetupAllowed(t *testing.T) {
++	newArgs := func() *arguments.Init {
++		return &arguments.Init{
++			View:            &arguments.View{ViewType: arguments.ViewHuman},
++			Backend:         &arguments.Backend{},
++			FlagBackend:     true,
++			FlagConfigExtra: flags.NewRawFlags("-backend-config"),
++		}
++	}
++
++	tests := []struct {
++		name       string
++		mutate     func(*arguments.Init)
++		input      bool
++		stdinPiped bool
++		automation bool
++		want       bool
++	}{
++		{"interactive human", func(*arguments.Init) {}, true, false, false, true},
++		{"json output", func(a *arguments.Init) { a.View.ViewType = arguments.ViewJSON }, true, false, false, false},
++		{"input disabled", func(*arguments.Init) {}, false, false, false, false},
++		{"stdin piped", func(*arguments.Init) {}, true, true, false, false},
++		{"automation", func(*arguments.Init) {}, true, false, true, false},
++		{"backend disabled", func(a *arguments.Init) { a.FlagBackend = false }, true, false, false, false},
++		{"backend config", func(a *arguments.Init) { _ = a.FlagConfigExtra.Set("x.hcl") }, true, false, false, false},
++		{"force copy", func(a *arguments.Init) { a.Backend.ForceInitCopy = true }, true, false, false, false},
++	}
++	for _, tc := range tests {
++		t.Run(tc.name, func(t *testing.T) {
++			args := newArgs()
++			tc.mutate(args)
++			if got := orasSetupAllowed(args, tc.input, tc.stdinPiped, tc.automation); got != tc.want {
++				t.Fatalf("orasSetupAllowed() = %v, want %v", got, tc.want)
++			}
++		})
++	}
++}
++
++func TestORASRepositoryPrompt(t *testing.T) {
++	inferred := orasRepositoryPrompt("ghcr.io/org/repo-tfstate")
++	if inferred.Default != "ghcr.io/org/repo-tfstate" || !strings.Contains(inferred.Description, "Press Enter") {
++		t.Fatalf("unexpected inferred prompt: %#v", inferred)
++	}
++	if got := orasRepositoryPrompt(""); got.Default != "" || strings.Contains(got.Description, "Press Enter") {
++		t.Fatalf("unexpected empty prompt: %#v", got)
++	}
++}
++
++func TestWriteORASBackendConfigDoesNotOverwrite(t *testing.T) {
++	dir := t.TempDir()
++	for _, name := range []string{"backend.tf", "backend.gh-tofu.tf", "backend.gh-tofu-2.tf"} {
++		if err := os.WriteFile(filepath.Join(dir, name), []byte("existing\n"), 0o644); err != nil {
++			t.Fatal(err)
++		}
++	}
++
++	path, err := writeORASBackendConfig(dir, "ghcr.io/org/state")
++	if err != nil {
++		t.Fatal(err)
++	}
++	if want := filepath.Join(dir, "backend.gh-tofu-3.tf"); path != want {
++		t.Fatalf("wrote %s, want %s", path, want)
++	}
++	content, err := os.ReadFile(path)
++	if err != nil {
++		t.Fatal(err)
++	}
++	if !strings.Contains(string(content), `repository = "ghcr.io/org/state"`) {
++		t.Fatalf("unexpected generated content: %s", content)
++	}
++	if existing, _ := os.ReadFile(filepath.Join(dir, "backend.tf")); string(existing) != "existing\n" {
++		t.Fatalf("existing backend.tf was changed: %s", existing)
++	}
++
++	second, err := writeORASBackendConfig(dir, "ghcr.io/org/state")
++	if err != nil {
++		t.Fatal(err)
++	}
++	if want := filepath.Join(dir, "backend.gh-tofu-4.tf"); second != want {
++		t.Fatalf("second write used %s, want %s", second, want)
++	}
++}
++
++func TestGeneratedORASConfigWarning(t *testing.T) {
++	if got := generatedORASConfigWarning("backend.tf", 0); len(got) != 0 {
++		t.Fatalf("success returned warnings: %#v", got)
++	}
++	if got := generatedORASConfigWarning("", 1); len(got) != 0 {
++		t.Fatalf("missing path returned warnings: %#v", got)
++	}
++	got := generatedORASConfigWarning("backend.tf", 1)
++	if len(got) != 1 {
++		t.Fatalf("failure returned %d diagnostics, want 1", len(got))
++	}
++	description := got[0].Description()
++	if description.Summary != "Generated ORAS backend configuration was kept" ||
++		!strings.Contains(description.Detail, "backend.tf") {
++		t.Fatalf("unexpected warning: %#v", description)
++	}
++}
++
++func TestEmitGeneratedORASConfigWarning(t *testing.T) {
++	tests := []struct {
++		name string
++		path string
++		code int
++		want int
++	}{
++		{"success", "backend.tf", 0, 0},
++		{"no generated file", "", 1, 0},
++		{"failure", "backend.tf", 1, 1},
++	}
++	for _, tc := range tests {
++		t.Run(tc.name, func(t *testing.T) {
++			view := &recordingInitView{}
++			emitGeneratedORASConfigWarning(view, tc.path, tc.code)
++			if len(view.diagnostics) != tc.want {
++				t.Fatalf("emitted %d diagnostic sets, want %d", len(view.diagnostics), tc.want)
++			}
++			if tc.want == 1 && len(view.diagnostics[0]) != 1 {
++				t.Fatalf("emitted %d diagnostics, want 1", len(view.diagnostics[0]))
++			}
++		})
++	}
++}
++
++func TestGeneratedORASConfigWarningRegisteredBeforeSetupReturns(t *testing.T) {
++	source, err := os.ReadFile("init.go")
++	if err != nil {
++		t.Fatal(err)
++	}
++	text := string(source)
++	deferAt := strings.Index(text, "emitGeneratedORASConfigWarning(view, generatedORASConfig, code)")
++	setupAt := strings.Index(text, "c.maybeSetupORASBackend(ctx, path, rootModEarly)")
++	setupErrorAt := strings.Index(text, "if setupDiags.HasErrors() {")
++	reloadAt := strings.LastIndex(text, "c.loadSingleModuleWithTests(ctx, path, args.TestsDirectory)")
++	if deferAt < 0 || setupAt < 0 || setupErrorAt < 0 || reloadAt < 0 {
++		t.Fatalf("could not find the setup sequence: defer=%d setup=%d error=%d reload=%d", deferAt, setupAt, setupErrorAt, reloadAt)
++	}
++	if deferAt > setupErrorAt || deferAt > reloadAt {
++		t.Fatalf("warning defer is registered too late: defer=%d error=%d reload=%d", deferAt, setupErrorAt, reloadAt)
++	}
++}
++
++func TestMaybeSetupORASBackendDeclineKeepsState(t *testing.T) {
++	dir := t.TempDir()
++	writeTestFile(t, filepath.Join(dir, "main.tf"), "terraform {}\n")
++	statePath := filepath.Join(dir, "terraform.tfstate")
++	state := []byte(`{"version":4,"serial":1}`)
++	if err := os.WriteFile(statePath, state, 0o600); err != nil {
++		t.Fatal(err)
++	}
++
++	view, done := testView(t)
++	defer done(t)
++	cleanup := testInputMap(t, map[string]string{"oras-backend-setup": "no"})
++	defer cleanup()
++
++	c := &InitCommand{Meta: Meta{WorkingDir: workdir.NewDir(dir), View: view}}
++	path, diags := c.maybeSetupORASBackend(context.Background(), dir, &configs.Module{})
++	if path != "" || diags.HasErrors() {
++		t.Fatalf("declined setup returned path %q and diagnostics %s", path, diags.Err())
++	}
++	if _, err := os.Stat(filepath.Join(dir, "backend.tf")); !os.IsNotExist(err) {
++		t.Fatalf("backend.tf was created after declining: %v", err)
++	}
++	got, err := os.ReadFile(statePath)
++	if err != nil {
++		t.Fatal(err)
++	}
++	if string(got) != string(state) {
++		t.Fatalf("state changed after declining: %s", got)
++	}
++}
++
++func TestMaybeSetupORASBackendInvalidRepository(t *testing.T) {
++	dir := t.TempDir()
++	writeTestFile(t, filepath.Join(dir, "main.tf"), "terraform {}\n")
++
++	view, done := testView(t)
++	defer done(t)
++	cleanup := testInputMap(t, map[string]string{
++		"oras-backend-setup":      "yes",
++		"oras-backend-repository": "ghcr.io/org/state:latest",
++	})
++	defer cleanup()
++
++	c := &InitCommand{Meta: Meta{WorkingDir: workdir.NewDir(dir), View: view}}
++	path, diags := c.maybeSetupORASBackend(context.Background(), dir, &configs.Module{})
++	if path != "" || !diags.HasErrors() || !strings.Contains(diags.Err().Error(), "tag or digest") {
++		t.Fatalf("invalid repository returned path %q and diagnostics %s", path, diags.Err())
++	}
++	if _, err := os.Stat(filepath.Join(dir, "backend.tf")); !os.IsNotExist(err) {
++		t.Fatalf("backend.tf was created for an invalid repository: %v", err)
++	}
++}
++
++func TestMaybeSetupORASBackendSkipsConfiguredBackend(t *testing.T) {
++	dir := t.TempDir()
++	writeTestFile(t, filepath.Join(dir, "main.tf"), "terraform {}\n")
++
++	view, done := testView(t)
++	defer done(t)
++	cleanup := testInputMap(t, map[string]string{})
++	defer cleanup()
++
++	c := &InitCommand{Meta: Meta{WorkingDir: workdir.NewDir(dir), View: view}}
++	path, diags := c.maybeSetupORASBackend(context.Background(), dir, &configs.Module{Backend: &configs.Backend{Type: "local"}})
++	if path != "" || diags.HasErrors() {
++		t.Fatalf("configured backend returned path %q and diagnostics %s", path, diags.Err())
++	}
++	if _, err := os.Stat(filepath.Join(dir, "backend.tf")); !os.IsNotExist(err) {
++		t.Fatalf("backend.tf was created with an existing backend: %v", err)
++	}
++}
++
++func TestMaybeSetupORASBackendWritesParsedConfig(t *testing.T) {
++	dir := t.TempDir()
++	writeTestFile(t, filepath.Join(dir, "main.tf"), "terraform {}\n")
++	t.Chdir(dir)
++
++	view, done := testView(t)
++	defer done(t)
++	cleanup := testInputMap(t, map[string]string{
++		"oras-backend-setup":      "yes",
++		"oras-backend-repository": "ghcr.io/org/state",
++	})
++	defer cleanup()
++
++	c := &InitCommand{Meta: Meta{WorkingDir: workdir.NewDir("."), View: view}}
++	path, diags := c.maybeSetupORASBackend(context.Background(), ".", &configs.Module{})
++	if path != "backend.tf" || diags.HasErrors() {
++		t.Fatalf("setup returned path %q and diagnostics %s", path, diags.Err())
++	}
++
++	mod, loadDiags := c.loadSingleModuleWithTests(context.Background(), ".", "tests")
++	if loadDiags.HasErrors() {
++		t.Fatalf("generated config did not load: %s", loadDiags.Err())
++	}
++	if mod.Backend == nil || mod.Backend.Type != "oras" {
++		t.Fatalf("generated config was not parsed as the oras backend: %#v", mod.Backend)
++	}
++}
++
++func TestORASAssistantGitOrigin(t *testing.T) {
++	dir := t.TempDir()
++	runGit(t, dir, "init", "-q")
++	runGit(t, dir, "remote", "add", "origin", "git@github.com:org/repo.git")
++	subdir := filepath.Join(dir, "modules", "network")
++	if err := os.MkdirAll(subdir, 0o755); err != nil {
++		t.Fatal(err)
++	}
++
++	origin, ok := gitRemoteOrigin(context.Background(), dir)
++	if !ok || origin != "git@github.com:org/repo.git" {
++		t.Fatalf("gitRemoteOrigin() = %q, %v", origin, ok)
++	}
++	prefix, ok := gitModulePrefix(context.Background(), subdir)
++	if !ok || prefix != "modules/network/" {
++		t.Fatalf("gitModulePrefix() = %q, %v", prefix, ok)
++	}
++}
++
++func TestORASAssistantParsedBackendDetection(t *testing.T) {
++	tests := []struct {
++		name  string
++		files map[string]string
++	}{
++		{"native backend", map[string]string{"main.tf": "terraform {\n  backend \"local\" {}\n}\n"}},
++		{"json backend", map[string]string{"main.tf.json": `{"terraform":{"backend":{"local":{}}}}`}},
++		{"override backend", map[string]string{
++			"main.tf":     "terraform {}\n",
++			"override.tf": "terraform {\n  backend \"local\" {}\n}\n",
++		}},
++		{"cloud block", map[string]string{"main.tf": "terraform {\n  cloud {\n    organization = \"example\"\n  }\n}\n"}},
++	}
++	for _, tc := range tests {
++		t.Run(tc.name, func(t *testing.T) {
++			dir := t.TempDir()
++			for name, content := range tc.files {
++				writeTestFile(t, filepath.Join(dir, name), content)
++			}
++			t.Chdir(dir)
++
++			view, done := testView(t)
++			defer done(t)
++			c := &InitCommand{Meta: Meta{WorkingDir: workdir.NewDir("."), View: view}}
++			mod, diags := c.loadSingleModuleWithTests(context.Background(), ".", "tests")
++			if diags.HasErrors() {
++				t.Fatalf("failed to load fixture: %s", diags.Err())
++			}
++			if mod.Backend == nil && mod.CloudConfig == nil {
++				t.Fatal("parser did not detect the configured backend or cloud block")
++			}
++		})
++	}
++}
++
++func writeTestFile(t *testing.T, path, content string) {
++	t.Helper()
++	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
++		t.Fatal(err)
++	}
++}
++
++func runGit(t *testing.T, dir string, args ...string) {
++	t.Helper()
++	command := exec.Command("git", append([]string{"-C", dir}, args...)...)
++	if out, err := command.CombinedOutput(); err != nil {
++		t.Fatalf("git %v: %s\n%s", args, err, out)
++	}
++}
 diff --git a/internal/command/init_oras_test.go b/internal/command/init_oras_test.go
 new file mode 100644
 index 000000000..8f931c463
