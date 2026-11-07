@@ -14,9 +14,16 @@ SRC="$WORK/opentofu"
 git clone --quiet --filter=blob:none https://github.com/opentofu/opentofu.git "$SRC"
 git -C "$SRC" checkout --quiet "$OPENTOFU_COMMIT"
 
-PATCH="$ROOT/patches/oras.patch"
-git -C "$SRC" apply --check "$PATCH"
-git -C "$SRC" apply "$PATCH"
+PATCHES=(
+  "$ROOT/patches/backend.patch"
+  "$ROOT/patches/history.patch"
+  "$ROOT/patches/init-assistant.patch"
+)
+
+for patch in "${PATCHES[@]}"; do
+  git -C "$SRC" apply --check "$patch"
+  git -C "$SRC" apply "$patch"
+done
 
 # Smart Refresh was removed entirely; fail if any of its symbols reappear.
 if git -C "$SRC" grep -qiE 'refreshsmart|smart_refresh' -- internal cmd; then
