@@ -19,13 +19,21 @@ WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 SRC="$WORK/opentofu"
 DEPS_PATCH="$WORK/deps.patch"
-NEW_PATCH="$WORK/oras.patch"
+NEW_PATCH="$WORK/backend.patch"
+
+PATCHES=(
+  "$ROOT/patches/backend.patch"
+  "$ROOT/patches/history.patch"
+  "$ROOT/patches/init-assistant.patch"
+)
 
 git clone --quiet --filter=blob:none https://github.com/opentofu/opentofu.git "$SRC"
 git -C "$SRC" checkout --quiet "$OPENTOFU_COMMIT"
 
-git -C "$SRC" apply --check "$ROOT/patches/oras.patch"
-git -C "$SRC" apply "$ROOT/patches/oras.patch"
+for patch in "${PATCHES[@]}"; do
+  git -C "$SRC" apply --check "$patch"
+  git -C "$SRC" apply "$patch"
+done
 
 GO_VERSION="$(awk '$1 == "go" { print $2; exit }' "$SRC/go.mod")"
 if [[ -z "$GO_VERSION" ]]; then
@@ -43,7 +51,7 @@ fi
 git -C "$SRC" diff --check -- go.mod go.sum
 git -C "$SRC" diff --no-ext-diff --binary -- go.mod go.sum > "$DEPS_PATCH"
 
-python3 - "$ROOT/patches/oras.patch" "$DEPS_PATCH" "$NEW_PATCH" <<'PY'
+python3 - "$ROOT/patches/backend.patch" "$DEPS_PATCH" "$NEW_PATCH" <<'PY'
 from pathlib import Path
 import sys
 
@@ -78,11 +86,11 @@ result += "".join(kept)
 Path(out_path).write_text(result)
 PY
 
-if cmp -s "$NEW_PATCH" "$ROOT/patches/oras.patch"; then
-  echo "oras-state $VERSION is already reflected in patches/oras.patch"
+if cmp -s "$NEW_PATCH" "$ROOT/patches/backend.patch"; then
+  echo "oras-state $VERSION is already reflected in patches/backend.patch"
 else
-  cp "$NEW_PATCH" "$ROOT/patches/oras.patch"
-  echo "Updated patches/oras.patch for oras-state $VERSION"
+  cp "$NEW_PATCH" "$ROOT/patches/backend.patch"
+  echo "Updated patches/backend.patch for oras-state $VERSION"
 fi
 
 echo "Running the normal gh-tofu verification gate"

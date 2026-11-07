@@ -66,6 +66,32 @@ configure state, or handle credentials.
 
 Pin `<ref>` to a tag or commit.
 
+## First run
+
+`gh tofu init` in an interactive terminal offers to set up the ORAS backend when the
+root module has no `backend` or `cloud` block:
+
+1. It asks whether to set up the backend. The default is no, and declining writes no file.
+2. It asks for the repository, pre-filled with a suggestion when `origin` is a
+   `github.com` HTTPS or SSH URL. The suggestion is
+   `ghcr.io/<owner>/<repo>-tfstate`, plus the module's subdirectory inside the
+   repository. Edit it before accepting. Other hosts, host aliases and GitHub Enterprise
+   URLs produce no suggestion.
+3. It writes `backend.tf` in the working directory, or `backend.gh-tofu.tf`,
+   `backend.gh-tofu-2.tf` and so on when that name is taken. Existing files are never
+   overwritten. An invalid location fails immediately without writing a file.
+
+OpenTofu then runs its normal backend migration and confirmation prompts. gh-tofu does
+not inspect, copy, delete or change state itself. If init or migration fails, the
+generated file is kept so you can fix the error and run `gh tofu init` again.
+
+The assistant is skipped when a `backend` or `cloud` block already exists, and in
+non-interactive use: no terminal, `-input=false`, `TF_INPUT=0`, `-backend=false`,
+`-json`, `-backend-config`, or `-force-copy`. CI must configure the backend explicitly.
+
+> An ORAS-configured directory requires gh-tofu. Stock Terraform and OpenTofu builds do
+> not include the `oras` backend and fail on these configurations.
+
 ## Configure the backend
 
 The state repository is required. It must be a plain string literal in the HCL backend
@@ -94,6 +120,9 @@ gh tofu apply
 ```
 
 ## Authentication
+
+The backend and the first-run assistant use the same credentials. The assistant never
+asks for or stores a registry token; it only writes the repository location.
 
 For `ghcr.io`, gh-tofu tries these sources in order and uses the first token it finds:
 

@@ -6,7 +6,9 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 source "$ROOT/gh-tofu.env"
 
 PATCHES=(
-  "$ROOT/patches/oras.patch"
+  "$ROOT/patches/backend.patch"
+  "$ROOT/patches/history.patch"
+  "$ROOT/patches/init-assistant.patch"
 )
 
 for patch in "${PATCHES[@]}"; do
