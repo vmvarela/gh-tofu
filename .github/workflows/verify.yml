@@ -32,6 +32,9 @@ jobs:
       - name: Verify OpenTofu update PR body
         run: python3 scripts/test-opentofu-update.py
 
+      - name: Verify GHCR E2E workflow contract
+        run: python3 scripts/test-e2e-ghcr.py
+
       - name: Verify patches and focused tests
         env:
           GH_TOFU_VERIFY_OUTPUT: ${{ runner.temp }}/gh-tofu

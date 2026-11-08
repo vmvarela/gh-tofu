@@ -1,0 +1,51 @@
+name: GHCR CLI lifecycle
+
+# Live, opt-in-only exercise of gh-tofu's GHCR credential path. Normal pull request and
+# master Verify runs never reach it: this workflow needs packages: write and mutates a
+# disposable workspace in ghcr.io/vmvarela/gh-tofu-e2e. Deleting those package versions
+# with GITHUB_TOKEN also needs package-admin access for the repository.
+
+on:
+  workflow_dispatch:
+    inputs:
+      run_ghcr_e2e:
+        description: "Run the live GHCR CLI lifecycle (writes disposable package versions)"
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+jobs:
+  ghcr-e2e:
+    name: GHCR CLI lifecycle
+    if: >-
+      ${{ inputs.run_ghcr_e2e == true
+      && github.repository == 'vmvarela/gh-tofu'
+      && github.ref == 'refs/heads/master' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version: "stable"
+          cache: false
+
+      - name: Build gh-tofu
+        run: bash ./scripts/build.sh
+
+      - name: Run GHCR CLI lifecycle
+        env:
+          GH_TOFU_GHCR_E2E: "1"
+          GH_TOFU_BIN: ${{ github.workspace }}/dist/gh-tofu
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: make e2e-ghcr

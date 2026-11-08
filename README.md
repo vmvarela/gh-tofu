@@ -205,6 +205,16 @@ per-version deletion and garbage collection are not provided.
   `max_versions` does not cap history there, and it can grow without limit. On other
   registries, pruning is best-effort.
 
+## Live GHCR CLI lifecycle test
+
+The normal `verify` workflow uses a disposable local registry. To test the CLI against GHCR, run the `GHCR CLI lifecycle` workflow manually from `master` and set `run_ghcr_e2e` to `true`. It rejects other repositories and refs, and gives package-write permission only to this job.
+
+Before the first run, configure the test package `ghcr.io/vmvarela/gh-tofu-e2e` for this repository and create a separate `gh-tofu-e2e-anchor` workspace. The workflow must have package-admin access to delete package versions; `packages: write` alone is not enough. Keep the anchor intact. The test uses synthetic state in a unique run-and-attempt workspace; never point it at a real state repository.
+
+Cleanup removes only the run's tagged workspace; it does not delete the package. GHCR may retain untagged package versions and does not prune this history. The job fails and reports the package, workspace and run IDs if it cannot confirm workspace deletion. Do not delete the whole package to clean up a run.
+
+After an authorized successful run, record its Actions URL and cleanup outcome in issue #5. Do not include state contents or credentials in the report.
+
 ## License
 
 See [LICENSE](LICENSE).
