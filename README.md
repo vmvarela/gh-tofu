@@ -46,6 +46,14 @@ curl -sSfL https://raw.githubusercontent.com/vmvarela/gh-tofu/master/scripts/ins
 Download `gh-tofu-<os>-<arch>` (or `gh-tofu-windows-amd64.exe`) from the release, and check
 it against `sha256sums.txt`. Then make it executable and put it on your `PATH`.
 
+Verify the downloaded release asset's provenance attestation with GitHub CLI:
+
+```sh
+gh attestation verify <asset> --repo vmvarela/gh-tofu
+```
+
+This requires GitHub CLI v2.67.0 or newer.
+
 Optional `tofu` command:
 
 ```sh

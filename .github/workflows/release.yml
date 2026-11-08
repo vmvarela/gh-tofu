@@ -47,7 +47,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
-          ref: master
+          ref: ${{ github.sha }}
           fetch-depth: 0
 
       - name: Validate pinned version and release type
@@ -58,6 +58,11 @@ jobs:
           PRERELEASE_SUFFIX: ${{ inputs.prerelease_suffix }}
           ALLOW_OLDER_UPSTREAM_PIN: ${{ inputs.allow_older_upstream_pin }}
         run: |
+          if [[ "${GITHUB_REF:-}" != "refs/heads/master" ]]; then
+            echo "::error::The release workflow must run from refs/heads/master, got: ${GITHUB_REF:-<unset>}"
+            exit 1
+          fi
+
           source ./gh-tofu.env
 
           if [[ "$OPENTOFU_REF" != "v$GH_TOFU_VERSION" ]]; then
@@ -151,6 +156,10 @@ jobs:
           fi
 
           SOURCE_SHA="$(git rev-parse HEAD)"
+          if [[ "$SOURCE_SHA" != "${GITHUB_SHA:-}" ]]; then
+            echo "::error::Checked out HEAD ($SOURCE_SHA) does not match GITHUB_SHA (${GITHUB_SHA:-<unset>})."
+            exit 1
+          fi
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
           echo "prerelease=$IS_PRERELEASE" >> "$GITHUB_OUTPUT"
@@ -174,6 +183,10 @@ jobs:
     name: Build ${{ matrix.os }}-${{ matrix.arch }}
     needs: verify
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
     timeout-minutes: 30
     strategy:
       fail-fast: false
@@ -221,6 +234,11 @@ jobs:
           fi
           mkdir -p artifacts
           cp dist/gh-tofu "artifacts/gh-tofu-${TARGET_OS}-${TARGET_ARCH}${EXT}"
+
+      - name: Attest packaged executable
+        uses: actions/attest@v4
+        with:
+          subject-path: artifacts/gh-tofu-*
 
       - uses: actions/upload-artifact@v7
         with:
