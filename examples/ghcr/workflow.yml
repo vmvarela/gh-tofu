@@ -1,0 +1,45 @@
+name: GHCR state example
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirm_apply:
+        description: "Confirm applying the synthetic example"
+        required: true
+        type: boolean
+        default: false
+
+jobs:
+  example:
+    if: ${{ inputs.confirm_apply && github.ref == 'refs/heads/main' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    concurrency:
+      # Keep this tied to the backend repository and workspace in main.tf.
+      group: ghcr.io-OWNER-infra-state-default
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - uses: vmvarela/gh-tofu@d35456dfdbbd2d14319d43c2ab8e2388aa5eb806 # v1.13.9
+        with:
+          version: "1.13.9"
+
+      - name: Initialize
+        run: gh-tofu init
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Plan
+        run: gh-tofu plan -out=tfplan
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Apply the saved plan
+        run: gh-tofu apply tfplan
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

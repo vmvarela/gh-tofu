@@ -149,6 +149,51 @@ and delete that package's versions on `api.github.com`. No other host or path re
 Other registries use step 4 only. Their token requests go over HTTPS. With `insecure`,
 credentials go only to the registry host.
 
+## GitHub Actions and GHCR example
+
+> **Security warning:** OpenTofu state and retained history can contain secrets
+> and other sensitive values, even when configuration marks them `sensitive`.
+> Keep the GHCR state package private. A public package, workflow log, or
+> uploaded state/history/plan file can expose those values. Do not upload state
+> or plan files as workflow artifacts.
+
+The copyable [synthetic configuration](examples/ghcr/main.tf) and
+[manual workflow](examples/ghcr/workflow.yml) exercise installation,
+authentication, `init`, `plan` and `apply` without managing cloud resources.
+Copy the configuration into the root of your configuration repository and the
+workflow to `.github/workflows/`; replace `OWNER` with the GHCR owner and change
+the `main` branch guard if your default branch has a different name. The
+workflow requires an explicit confirmation input before it applies.
+
+Before running it:
+
+1. Keep `ghcr.io/OWNER/infra-state` **private**. Package visibility is separate
+   from repository visibility. GHCR creates a package on first publication;
+   verify its settings afterward. For an existing package, open **Package
+   settings → Manage Actions access**, add the repository running the workflow,
+   and grant it write access. Do this explicitly for existing or previously
+   linked packages; do not assume a repository link alone grants the workflow
+   access. If the first write cannot create or access the package, bootstrap it
+   with an authorized publisher, grant Actions access, then rerun the workflow.
+2. The job grants only `contents: read` (checkout) and `packages: write`
+   (state access), matching the existing
+   [live GHCR CLI workflow](.github/workflows/ghcr-e2e.yml). The commands
+   receive `GITHUB_TOKEN` as `GH_TOKEN`; token permission and package-level
+   Actions access must both allow writing.
+3. The example does not delete state. Deleting GHCR package versions requires
+   package-admin access for the token; `packages: write` alone is insufficient.
+   Keep that access out of routine workflows.
+
+The composite action only installs the version-pinned CLI; it does not run
+OpenTofu or configure the backend or credentials. The concurrency group is
+keyed to this state repository and default workspace, with
+`cancel-in-progress: false`; GitHub Actions concurrency is still scoped to one
+repository and does not coordinate other repositories or local runs. See
+[writer and recovery limits](docs/writer-model-and-recovery.md). GHCR does not
+prune state history automatically, and `max_versions` does not cap it; the
+example leaves history disabled. If you enable history, treat every retained
+version as sensitive too.
+
 ## Backend options
 
 | Option | Default | Meaning |
