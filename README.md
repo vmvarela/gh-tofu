@@ -186,6 +186,10 @@ per-version deletion and garbage collection are not provided.
 
 ## Data safety and limits
 
+The supported writer model for this backend, and how to recover after lost
+locks, expired leases or failed publications, is documented in
+[Writer model and state recovery](docs/writer-model-and-recovery.md).
+
 - gh-tofu does not retry a whole state or workspace delete, because a retry could delete
   state that another process wrote in the meantime. On `ghcr.io`, oras-state can retry the
   package-version DELETE for the same version ID, up to three attempts, when GitHub
