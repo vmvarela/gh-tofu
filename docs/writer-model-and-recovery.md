@@ -20,8 +20,11 @@ operation that publishes state: `apply`, `state push`, `state mv`, `state rm`,
 or workspace deletion. Any process with registry credentials can write — the
 state repository, not your configuration repository, is the boundary.
 
-- **Read-only commands** (`plan`, `state pull`, `history list|show|pull`) do not
-  need the writer position; they may run concurrently.
+- **`plan` does not publish state, but acquires the exclusive state lock by
+  default**, so it participates in lock contention with other operations. The
+  read-only commands `state pull` and `history list|show|pull` do not acquire
+  that lock and may run concurrently. Do not use `-lock=false` as a general
+  workaround.
 - **Different workspaces** in the same state repository hold independent locks
   and can be written in parallel — but they may still touch the same
   infrastructure resources.
@@ -34,8 +37,9 @@ state repository, not your configuration repository, is the boundary.
 When an operation begins, the backend publishes a lock manifest for the
 workspace. It records the holder ID, operation, creation time and — when
 `lock_ttl` is set — an expiry. Acquisition increments a generation counter and
-re-reads the tag after a short stability window, so two simultaneous acquirers
-do not both believe they won.
+re-reads the tag after a short stability window. This can detect some races and
+reduces the window for them, but it cannot prevent a competing acquisition; two
+simultaneous acquirers may both believe they won.
 
 Nothing in OCI actually enforces this:
 
@@ -155,16 +159,22 @@ directory rather than losing it, and stops with `Failed to save state`.
    your provider's console or API.
 3. Decide who owns the workspace — check CI runs for every writing repository
    and anyone sharing credentials first:
-   - Another writer superseded you: their state is authoritative. Inspect the
-     drift it will show on the next plan and reconcile infrastructure through
-     plan/apply, not by overwriting their state.
-   - You are the only writer (lease expired, forced unlock, infrastructure
-     error): the snapshot in `errored.tfstate` is the newest truth.
-4. Publish the newest truth with `tofu state push errored.tfstate`. The command
-    takes the state lock by default and refuses an older serial or a foreign
-    lineage; use `-force` only after you have verified the serial, lineage and
-    content, and that no other writer is active. Do not pass `-lock=false`.
-5. Confirm with `tofu plan` that there is no drift, then delete the snapshot.
+    - Another writer superseded you: treat its state as authoritative, but
+      inspect infrastructure changes from both runs. A plan does not discover
+      resources absent from state; import or otherwise reconcile those resources
+      before applying again.
+    - You are the only writer (lease expired, forced unlock, infrastructure
+      error): treat `errored.tfstate` as a recovery candidate, then compare it
+      with remote state and actual infrastructure before restoring it.
+4. This adapter does not expose OpenTofu's optional `Migrator` or
+   `PersistentMeta` state-manager interfaces. As a result, `state push` does not
+   enforce the usual serial/lineage checks, and `state pull` may export empty
+   serial/lineage metadata. Do not rely on those checks to protect a push: first
+   preserve a secured copy of the remote state, verify the snapshot's contents
+   against actual infrastructure, and confirm no writer is active. Keep the
+   default state lock enabled; `-force` does not restore the missing checks.
+5. After a carefully verified recovery, run `tofu plan` to inspect remaining
+   differences. Keep the snapshot until recovery is complete.
 
 Never recover by immediately re-running `apply`: it reads the (older) remote
 state, plans against it, and re-creates changes you already made — a forked
@@ -180,9 +190,12 @@ write may or may not have applied. There is no rollback to perform.
 2. Read the remote state (`tofu state pull > recovery-inspect.json`, secured).
 3. If it already contains the intended result, you are done: confirm with a
    fresh plan.
-4. If it does not, re-run the operation normally after re-acquiring the lock.
-   `apply` refreshes remote state first and reconciles whatever previous runs
-   left half-applied, so no forked state is created.
+4. If it does not, confirm no other writer is active and acquire the lock before
+   recovery. Compare the remote state with `errored.tfstate` (if present) and
+   inspect the actual infrastructure. A refresh does not discover resources
+   that were created but never recorded in state. Restore a verified snapshot or
+   import/reconcile such resources before applying again. Re-run only after
+   confirming there are no real changes missing from state.
 5. `errored.tfstate` may exist from the failed run; keep it secured until the
    fresh run has converged.
 
@@ -205,7 +218,9 @@ automatic retry.
 
 ### If state was never published
 
-If the whole write failed before the registry accepted anything (network
-error, size limit, lock refusal) and no newer writer exists, the workspace
-still holds the previous state. `tofu plan` shows the pending changes; re-run
-the operation once you know why the write failed.
+If the write failed before the registry accepted anything (network error, size
+limit, lock refusal), remote state remains unchanged, but an `apply` may already
+have changed infrastructure. Keep `errored.tfstate` if OpenTofu created it;
+inspect remote state and actual resources before deciding what to do. Import or
+reconcile changes that are real but absent from state. Re-run only after
+confirming no such changes remain and understanding why the write failed.
