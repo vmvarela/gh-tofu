@@ -1,0 +1,572 @@
+diff --git a/cmd/tofu/commands.go b/cmd/tofu/commands.go
+--- a/cmd/tofu/commands.go
++++ b/cmd/tofu/commands.go
+@@ -444,6 +444,12 @@
+ 			}, nil
+ 		},
+ 
++		"state compact": func() (cli.Command, error) {
++			return &command.StateCompactCommand{
++				StateMeta: command.StateMeta{Meta: meta},
++			}, nil
++		},
++
+ 		"state pull": func() (cli.Command, error) {
+ 			return &command.StatePullCommand{
+ 				StateMeta: command.StateMeta{Meta: meta},
+diff --git a/internal/command/state_command.go b/internal/command/state_command.go
+--- a/internal/command/state_command.go
++++ b/internal/command/state_command.go
+@@ -24,6 +24,7 @@
+ 
+ 		Commands: []Command{
+ 			StateListCommander(),
++			StateCompactCommander(),
+ 			StateMvCommander(),
+ 			StatePullCommander(),
+ 			StatePushCommander(),
+diff --git a/internal/backend/remote-state/oras/backend.go b/internal/backend/remote-state/oras/backend.go
+--- a/internal/backend/remote-state/oras/backend.go
++++ b/internal/backend/remote-state/oras/backend.go
+@@ -216,14 +216,27 @@
+ 	}
+ 	b.orasCredsPolicy = realORASCredentialsPolicy{policy: policy}
+ 
+-	credFunc, err := b.orasCredsPolicy.CredentialFunc(ctx, b.repository)
++	b.client, err = b.newClient(ctx, b.repository)
++	return err
++}
++
++// newClient builds an ORAS client for repository with the backend's configured
++// transport and credential policy. Credentials are resolved for repository, so
++// a copy destination gets its own path.
++func (b *Backend) newClient(ctx context.Context, repository string) (*orasstate.Client, error) {
++	ref, err := parseRepository(repository)
+ 	if err != nil {
+-		return err
++		return nil, err
++	}
++
++	credFunc, err := b.orasCredsPolicy.CredentialFunc(ctx, repository)
++	if err != nil {
++		return nil, err
+ 	}
+ 
+ 	httpClient, err := newHTTPClient(ref.Registry, b.insecure, b.caFile, b.rateLimit, b.rateBurst)
+ 	if err != nil {
+-		return err
++		return nil, err
+ 	}
+ 
+ 	cfg := orasstate.Config{
+@@ -252,8 +265,7 @@
+ 		}
+ 	}
+ 
+-	b.client, err = orasstate.NewClient(ref.Registry, ref.Repository, cfg)
+-	return err
++	return orasstate.NewClient(ref.Registry, ref.Repository, cfg)
+ }
+ 
+ func (b *Backend) StateMgr(_ context.Context, workspace string) (statemgr.Full, error) {
+diff --git a/internal/backend/remote-state/oras/state_copy.go b/internal/backend/remote-state/oras/state_copy.go
+new file mode 100644
+--- /dev/null
++++ b/internal/backend/remote-state/oras/state_copy.go
+@@ -0,0 +1,74 @@
++package oras
++
++import (
++	"context"
++	"fmt"
++	"strings"
++
++	orasstate "github.com/vmvarela/oras-state"
++)
++
++// StateCopy is a validated copy between the configured source repository and a
++// destination repository. Destination credentials are resolved for the
++// destination path; transport, TLS and retry policy match the source.
++type StateCopy struct {
++	SourceRepository      string
++	DestinationRepository string
++	Source                *orasstate.Client
++	Destination           *orasstate.Client
++}
++
++// StateCopy validates destination and builds both clients. The source client is
++// the configured backend client; the destination client is read-only until the
++// caller runs CopyTo.
++func (b *Backend) StateCopy(ctx context.Context, destination string) (*StateCopy, error) {
++	if err := validateCopyDestination(b.repository, destination); err != nil {
++		return nil, err
++	}
++	if b.client == nil {
++		return nil, fmt.Errorf("backend is not configured")
++	}
++
++	dst, err := b.newClient(ctx, destination)
++	if err != nil {
++		return nil, fmt.Errorf("configuring destination repository %s: %w", destination, err)
++	}
++	return &StateCopy{
++		SourceRepository:      b.repository,
++		DestinationRepository: destination,
++		Source:                b.client,
++		Destination:           dst,
++	}, nil
++}
++
++// validateCopyDestination accepts a literal registry/repository on the same
++// registry as the source. GHCR copies must stay in the source owner, because a
++// destination under another owner would need different package access.
++func validateCopyDestination(source, destination string) error {
++	src, err := parseRepository(source)
++	if err != nil {
++		return fmt.Errorf("source repository %q: %w", source, err)
++	}
++	dst, err := parseRepository(destination)
++	if err != nil {
++		return fmt.Errorf("destination %q: %w", destination, err)
++	}
++	if strings.EqualFold(src.Registry, dst.Registry) && strings.EqualFold(src.Repository, dst.Repository) {
++		return fmt.Errorf("destination must differ from the source repository %s", source)
++	}
++	if !strings.EqualFold(src.Registry, dst.Registry) {
++		return fmt.Errorf("destination %s is on a different registry; state can only be copied within %s", dst.Registry, src.Registry)
++	}
++	if strings.EqualFold(src.Registry, ghcrRegistry) {
++		srcOwner, dstOwner := ghcrOwner(src.Repository), ghcrOwner(dst.Repository)
++		if !strings.EqualFold(srcOwner, dstOwner) {
++			return fmt.Errorf("destination %s must stay in the same %s owner as the source (%s); cross-owner copies are not supported", dst.Repository, ghcrRegistry, srcOwner)
++		}
++	}
++	return nil
++}
++
++func ghcrOwner(repository string) string {
++	owner, _, _ := strings.Cut(repository, "/")
++	return owner
++}
+diff --git a/internal/backend/remote-state/oras/state_copy_test.go b/internal/backend/remote-state/oras/state_copy_test.go
+new file mode 100644
+--- /dev/null
++++ b/internal/backend/remote-state/oras/state_copy_test.go
+@@ -0,0 +1,81 @@
++package oras
++
++import (
++	"strings"
++	"testing"
++)
++
++func TestValidateCopyDestination(t *testing.T) {
++	tests := []struct {
++		name        string
++		source      string
++		destination string
++		wantErr     string
++	}{
++		{
++			name:        "same registry new repository",
++			source:      "ghcr.io/acme/state",
++			destination: "ghcr.io/acme/state-next",
++		},
++		{
++			name:        "same repository",
++			source:      "ghcr.io/acme/state",
++			destination: "ghcr.io/acme/state",
++			wantErr:     "must differ",
++		},
++		{
++			name:        "different registry",
++			source:      "ghcr.io/acme/state",
++			destination: "registry.example.com/acme/state",
++			wantErr:     "different registry",
++		},
++		{
++			name:        "different ghcr owner",
++			source:      "ghcr.io/acme/state",
++			destination: "ghcr.io/other/state",
++			wantErr:     "same ghcr.io owner",
++		},
++		{
++			name:        "destination tag",
++			source:      "ghcr.io/acme/state",
++			destination: "ghcr.io/acme/state:v1",
++			wantErr:     "tag or digest",
++		},
++		{
++			name:        "destination digest",
++			source:      "ghcr.io/acme/state",
++			destination: "ghcr.io/acme/state@sha256:0000000000000000000000000000000000000000000000000000000000000000",
++			wantErr:     "tag or digest",
++		},
++		{
++			name:        "non-ghcr other owner path",
++			source:      "registry.example.com:5000/acme/state",
++			destination: "registry.example.com:5000/other/state",
++		},
++	}
++
++	for _, test := range tests {
++		t.Run(test.name, func(t *testing.T) {
++			err := validateCopyDestination(test.source, test.destination)
++			if test.wantErr == "" {
++				if err != nil {
++					t.Fatalf("unexpected error: %s", err)
++				}
++				return
++			}
++			if err == nil {
++				t.Fatalf("expected error containing %q", test.wantErr)
++			}
++			if !strings.Contains(err.Error(), test.wantErr) {
++				t.Fatalf("error = %q, want it to contain %q", err, test.wantErr)
++			}
++		})
++	}
++}
++
++func TestStateCopyRequiresConfiguredBackend(t *testing.T) {
++	b := &Backend{repository: "ghcr.io/acme/state"}
++	if _, err := b.StateCopy(t.Context(), "ghcr.io/acme/state-next"); err == nil {
++		t.Fatal("StateCopy succeeded on an unconfigured backend")
++	}
++}
+diff --git a/internal/command/state_compact.go b/internal/command/state_compact.go
+new file mode 100644
+--- /dev/null
++++ b/internal/command/state_compact.go
+@@ -0,0 +1,179 @@
++package command
++
++import (
++	"context"
++	"fmt"
++	"io"
++	"os"
++	"strings"
++
++	orasstate "github.com/vmvarela/oras-state"
++
++	backendORAS "github.com/opentofu/opentofu/internal/backend/remote-state/oras"
++	"github.com/opentofu/opentofu/internal/command/arguments"
++)
++
++// stateCopyBackend is implemented by the ORAS backend, which validates the
++// destination and builds the two clients for a repository-to-repository copy.
++type stateCopyBackend interface {
++	StateCopy(context.Context, string) (*backendORAS.StateCopy, error)
++}
++
++const stateCompactLong = `Copy every tagged state artifact from the configured repository to a new
++repository, verify both sides, and keep the source unchanged.
++
++The destination is a literal registry/repository without a tag or digest. It
++must be on the same registry as the configured source; for ghcr.io it must also
++stay in the same owner.
++
++Stop every process that writes the source state repository and put it in
++maintenance before planning. Keep all of them stopped until the copy and its
++verification finish. A concurrent change is detected by re-inventory, but that
++detection is not compare-and-swap: it cannot guarantee a consistent snapshot and
++can leave a partial destination or fail verification.
++
++This command is a dry run by default. It never deletes the source, changes
++configuration, the saved backend, or plan files, and it does not require
++deletion credentials. After it succeeds, edit the backend "repository" literal
++and run "gh tofu init -reconfigure".`
++
++func StateCompactCommander() Command {
++	cmd := Command{
++		Name:  "compact",
++		Short: "Copy state artifacts to a new repository",
++		Long:  stateCompactLong,
++		UsageOverride: UsageOverride{
++			Usage: "tofu [global options] state compact [options] <destination>",
++		},
++	}
++
++	args := arguments.BindStateCompact(&cmd.CommandLine)
++	cmd.Run = func(meta Meta) int {
++		return StateCompactCommand{StateMeta{meta}}.Execute(args)
++	}
++
++	return cmd
++}
++
++// StateCompactCommand is a Command implementation for 'state compact'.
++type StateCompactCommand struct {
++	StateMeta
++}
++
++func (c *StateCompactCommand) Run(rawArgs []string) int {
++	return RunCommand(StateCompactCommander(), c.Meta, rawArgs)
++}
++
++func (c StateCompactCommand) Execute(args *arguments.StateCompact) int {
++	if strings.TrimSpace(args.Destination) == "" {
++		return stateCompactError(fmt.Errorf("state compact requires a destination repository in the form <registry>/<repository>"))
++	}
++
++	ctx := c.CommandContext()
++	if diags := c.Meta.checkRequiredVersion(ctx); diags.HasErrors() {
++		return stateCompactError(diags.Err())
++	}
++
++	enc, diags := c.Encryption(ctx)
++	if diags.HasErrors() {
++		return stateCompactError(diags.Err())
++	}
++
++	b, diags := c.Backend(ctx, nil, enc.State())
++	if diags.HasErrors() {
++		return stateCompactError(diags.Err())
++	}
++	// The copy reads the source and writes only to the destination.
++	c.ignoreRemoteVersionConflict(b)
++
++	copyBackend, ok := b.(stateCopyBackend)
++	if !ok {
++		return stateCompactError(fmt.Errorf("the active backend does not support state compaction; configure the oras backend"))
++	}
++
++	stateCopy, err := copyBackend.StateCopy(ctx, args.Destination)
++	if err != nil {
++		return stateCompactError(err)
++	}
++
++	plan, err := stateCopy.Source.PlanCopy(ctx)
++	if err != nil {
++		return stateCompactError(fmt.Errorf("planning copy: %w", err))
++	}
++	if err := checkCompactPlan(plan); err != nil {
++		return stateCompactError(err)
++	}
++	writeCompactPlan(os.Stdout, stateCopy, plan)
++
++	if !args.Apply {
++		fmt.Fprintln(os.Stdout, "\nDry run: nothing was written. Re-run with -apply to copy and verify.")
++		return 0
++	}
++
++	report, err := stateCopy.Source.CopyTo(ctx, stateCopy.Destination, plan)
++	if err != nil {
++		if report != nil {
++			fmt.Fprintf(os.Stdout, "\nCopy stopped after %d copied, %d already present, %d verified.\n",
++				len(report.Copied), len(report.Existing), len(report.Verified))
++		}
++		return stateCompactError(fmt.Errorf("copying state: %w", err))
++	}
++	writeCompactReport(os.Stdout, stateCopy, report)
++	return 0
++}
++
++func (c *StateCompactCommand) Help() string {
++	return "Usage: tofu [global options] state compact [options] <destination>\n\n" + stateCompactLong + `
++
++Options:
++
++  -apply    Copy and verify the planned artifacts.`
++}
++
++func (c *StateCompactCommand) Synopsis() string {
++	return "Copy state artifacts to a new repository"
++}
++
++func checkCompactPlan(plan *orasstate.CopyPlan) error {
++	if plan == nil || len(plan.Artifacts) == 0 {
++		return fmt.Errorf("the source repository has no tagged state artifacts to copy; refusing to point the backend at an empty destination")
++	}
++	return nil
++}
++
++func writeCompactPlan(w io.Writer, stateCopy *backendORAS.StateCopy, plan *orasstate.CopyPlan) {
++	fmt.Fprintf(w, "Source:      %s\n", stateCopy.SourceRepository)
++	fmt.Fprintf(w, "Destination: %s\n\n", stateCopy.DestinationRepository)
++	fmt.Fprintf(w, "Plan: %d artifact(s) to copy, %d skipped.\n", len(plan.Artifacts), len(plan.Skipped))
++	if len(plan.Skipped) > 0 {
++		fmt.Fprintf(w, "Skipped tags: %s\n", strings.Join(plan.Skipped, ", "))
++	}
++	if isGHCRRepository(stateCopy.DestinationRepository) {
++		fmt.Fprintln(w, "OCI tags cannot reveal untagged versions already in the destination package; use a new package for a clean target.")
++	}
++}
++
++func writeCompactReport(w io.Writer, stateCopy *backendORAS.StateCopy, report *orasstate.CopyReport) {
++	fmt.Fprintf(w, "\nCopy: %d copied, %d already present, %d verified.\n",
++		len(report.Copied), len(report.Existing), len(report.Verified))
++	fmt.Fprintln(w, "Source retained: no source artifact or package version was deleted, and no deletion credentials were used.")
++	if isGHCRRepository(stateCopy.SourceRepository) {
++		fmt.Fprintln(w, "\nUntagged GHCR package versions cannot be detected through OCI tags. Any")
++		fmt.Fprintln(w, "untagged versions in the source package are neither listed nor copied.")
++	}
++	fmt.Fprintf(w, "\nNext steps:\n")
++	fmt.Fprintf(w, "  1. Edit the backend \"repository\" literal in your configuration to:\n       %s\n", stateCopy.DestinationRepository)
++	fmt.Fprintf(w, "  2. Run: gh tofu init -reconfigure\n")
++	fmt.Fprintf(w, "  3. Confirm the destination works (for example gh tofu plan) before moving\n")
++	fmt.Fprintf(w, "     other writers. Do not use -migrate-state for this copy.\n")
++}
++
++func isGHCRRepository(repository string) bool {
++	registry, _, _ := strings.Cut(repository, "/")
++	return strings.EqualFold(registry, "ghcr.io")
++}
++
++func stateCompactError(err error) int {
++	fmt.Fprintf(os.Stderr, "Error: %s\n", err)
++	return 1
++}
+diff --git a/internal/command/state_compact_test.go b/internal/command/state_compact_test.go
+new file mode 100644
+--- /dev/null
++++ b/internal/command/state_compact_test.go
+@@ -0,0 +1,80 @@
++package command
++
++import (
++	"bytes"
++	"strings"
++	"testing"
++
++	orasstate "github.com/vmvarela/oras-state"
++
++	backendORAS "github.com/opentofu/opentofu/internal/backend/remote-state/oras"
++	"github.com/opentofu/opentofu/internal/command/arguments"
++)
++
++func TestStateCompactRequiresDestination(t *testing.T) {
++	if code := (StateCompactCommand{}).Execute(&arguments.StateCompact{}); code != 1 {
++		t.Fatalf("exit code = %d, want 1", code)
++	}
++}
++
++func TestCheckCompactPlanRefusesEmpty(t *testing.T) {
++	if err := checkCompactPlan(&orasstate.CopyPlan{}); err == nil {
++		t.Fatal("empty plan was accepted")
++	}
++	if err := checkCompactPlan(&orasstate.CopyPlan{
++		Artifacts: []orasstate.CopyArtifact{{Tag: "state-default"}},
++		Skipped:   []string{"unlocked-default"},
++	}); err != nil {
++		t.Fatalf("plan with artifacts was refused: %s", err)
++	}
++}
++
++func TestWriteCompactOutput(t *testing.T) {
++	stateCopy := &backendORAS.StateCopy{
++		SourceRepository:      "ghcr.io/acme/state",
++		DestinationRepository: "ghcr.io/acme/state-next",
++	}
++	plan := &orasstate.CopyPlan{
++		Artifacts: []orasstate.CopyArtifact{{Tag: "state-default"}, {Tag: "stver-default-v1"}, {Tag: "custom-artifact"}},
++		Skipped:   []string{"unlocked-default"},
++	}
++	report := &orasstate.CopyReport{
++		Copied:   []orasstate.CopyArtifact{{Tag: "state-default"}, {Tag: "stver-default-v1"}},
++		Existing: []orasstate.CopyArtifact{{Tag: "custom-artifact"}},
++		Verified: []orasstate.CopyArtifact{{Tag: "state-default"}, {Tag: "stver-default-v1"}, {Tag: "custom-artifact"}},
++	}
++
++	var out bytes.Buffer
++	writeCompactPlan(&out, stateCopy, plan)
++	writeCompactReport(&out, stateCopy, report)
++	got := out.String()
++
++	for _, want := range []string{
++		"Source:      ghcr.io/acme/state",
++		"Destination: ghcr.io/acme/state-next",
++		"Plan: 3 artifact(s) to copy, 1 skipped.",
++		"unlocked-default",
++		"Copy: 2 copied, 1 already present, 3 verified.",
++		"Source retained",
++		"Untagged GHCR package versions",
++		"ghcr.io/acme/state-next",
++		"gh tofu init -reconfigure",
++		"-migrate-state",
++	} {
++		if !strings.Contains(got, want) {
++			t.Fatalf("output missing %q:\n%s", want, got)
++		}
++	}
++}
++
++func TestWriteCompactReportSkipsUntaggedNoteOffGHCR(t *testing.T) {
++	stateCopy := &backendORAS.StateCopy{
++		SourceRepository:      "registry.example.com:5000/acme/state",
++		DestinationRepository: "registry.example.com:5000/acme/state-next",
++	}
++	var out bytes.Buffer
++	writeCompactReport(&out, stateCopy, &orasstate.CopyReport{})
++	if strings.Contains(out.String(), "Untagged GHCR") {
++		t.Fatalf("GHCR note printed for a non-GHCR source:\n%s", out.String())
++	}
++}
+diff --git a/internal/command/arguments/state_compact.go b/internal/command/arguments/state_compact.go
+new file mode 100644
+--- /dev/null
++++ b/internal/command/arguments/state_compact.go
+@@ -0,0 +1,18 @@
++package arguments
++
++// StateCompact represents the command-line arguments for 'state compact'.
++type StateCompact struct {
++	// Destination is the literal registry/repository that receives the copy.
++	Destination string
++
++	// Apply writes the copy. Without it the command only plans.
++	Apply bool
++}
++
++// BindStateCompact registers CLI arguments for 'state compact'.
++func BindStateCompact(cli *CommandLine) *StateCompact {
++	ret := &StateCompact{}
++	cli.BoolVar(&ret.Apply, "apply", false, "Copy the planned artifacts to the destination repository. Without this flag nothing is written.")
++	cli.PositionalArg(&ret.Destination, "destination", true)
++	return ret
++}
+diff --git a/internal/command/arguments/state_compact_test.go b/internal/command/arguments/state_compact_test.go
+new file mode 100644
+--- /dev/null
++++ b/internal/command/arguments/state_compact_test.go
+@@ -0,0 +1,39 @@
++package arguments
++
++import "testing"
++
++func TestStateCompactApplyFlag(t *testing.T) {
++	var cli CommandLine
++	args := BindStateCompact(&cli)
++	if diags := cli.ParseLegacy([]string{"-apply", "ghcr.io/acme/state-next"}); diags.HasErrors() {
++		t.Fatalf("ParseLegacy(-apply destination): %s", diags.Err())
++	}
++	if !args.Apply {
++		t.Fatal("-apply did not enable the copy")
++	}
++	if args.Destination != "ghcr.io/acme/state-next" {
++		t.Fatalf("destination = %q", args.Destination)
++	}
++}
++
++func TestStateCompactDefaultsToPlan(t *testing.T) {
++	var cli CommandLine
++	args := BindStateCompact(&cli)
++	if diags := cli.ParseLegacy([]string{"ghcr.io/acme/state-next"}); diags.HasErrors() {
++		t.Fatalf("ParseLegacy(destination): %s", diags.Err())
++	}
++	if args.Apply {
++		t.Fatal("state compact must be a dry run without -apply")
++	}
++}
++
++func TestStateCompactEmptyDestination(t *testing.T) {
++	var cli CommandLine
++	args := BindStateCompact(&cli)
++	if diags := cli.ParseLegacy(nil); diags.HasErrors() {
++		t.Fatalf("ParseLegacy(nil): %s", diags.Err())
++	}
++	if args.Destination != "" {
++		t.Fatalf("destination = %q, want empty", args.Destination)
++	}
++}

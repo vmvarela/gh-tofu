@@ -117,6 +117,41 @@ infrastructure scope can prevent it.
 runners and let their background retention finish. A new process does not fence
 old ones.
 
+## Repository migration
+
+`tofu state compact` copies the configured state repository to a new repository.
+It does not rename a GHCR package, prune history, or change configuration. The
+copy is read-only for the source: it never deletes source artifacts, and it does
+not use package-deletion credentials.
+
+1. **Stop and drain writers.** Stop every pipeline and workstation that writes the
+   source repository workspace, put it in maintenance, and keep it stopped from
+   before planning until verification finishes. The state lock detects contention
+   but is not fencing, and it does not stop new writers. The copy re-inventories
+   the source to detect changes, but that is detection, not compare-and-swap: a
+   concurrent write can leave a partial destination or fail verification, and no
+   consistent snapshot is guaranteed.
+2. **Plan.** Run `tofu state compact <registry>/<repository>` and read the source,
+   destination, artifact and skipped counts. The destination must be on the same
+   registry; on `ghcr.io` it must stay in the same owner. A destination with
+   conflicting or unexpected tags is refused.
+3. **Copy.** Run the same command with `-apply` while writers stay stopped. It
+   copies all tagged non-lock artifacts, skips `unlocked-` markers, refuses
+   `locked-` markers, and verifies the destination and source snapshot. A resumed
+   run reuses only artifacts whose digest matches.
+4. **Reconfigure.** Edit the backend `repository` literal and run
+   `tofu init -reconfigure`. Do not use `-migrate-state`: this is a byte-preserving
+   copy, and migration would re-serialize and possibly re-encrypt state.
+5. **Validate.** Confirm the destination with a plan or a read-only state command
+   before allowing other writers to use it. Package visibility and permissions are
+   not part of the copy and must be configured separately.
+6. **Keep the source.** Retiring the source package is a separate, explicitly
+   authorized action. Do it only after every consumer and credential path has moved
+   and source writers are fenced; otherwise retain it.
+
+OCI tags cannot prove that a package has no untagged versions. `state compact`
+neither lists nor copies untagged package versions, and GHCR does not prune them.
+
 ## Recovery
 
 Quick reference:

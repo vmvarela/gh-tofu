@@ -229,6 +229,56 @@ gh tofu history pull --output recovery.tfstate 3
 Backends without this capability return a clear error. History is read-only. Restore,
 per-version deletion and garbage collection are not provided.
 
+## State compaction and migration
+
+`state compact` copies the state repository to a new repository without deleting or
+changing the source. Use it to move state to a new package; it is not a history
+pruner and it does not rename a GHCR package.
+
+```sh
+gh tofu state compact ghcr.io/my-org/infra-state-next
+gh tofu state compact -apply ghcr.io/my-org/infra-state-next
+```
+
+The first form is a dry run that reports the source, destination, artifact and
+skipped counts. `-apply` performs the copy and verification.
+
+Stop and drain every process that writes the source state repository, put it in
+maintenance, and keep it stopped from before planning until verification finishes.
+The command re-inventories the source to detect changes, but that is detection,
+not fencing or compare-and-swap: a concurrent write can leave a partial destination
+or fail verification, and no consistent snapshot is guaranteed.
+
+- The destination is a literal `<registry>/<repository>` without a tag or digest. It
+  must be on the same registry as the configured backend; for `ghcr.io` it must also
+  stay in the same owner.
+- The copy includes every tagged state, history and unknown artifact, including
+  tags the backend does not recognize. `unlocked-` markers are skipped, and any
+  `locked-` tag makes the plan fail instead of being copied or bypassed.
+- Before writing, the destination must be empty or already contain only the expected
+  tags with matching digests. Conflicting or unexpected tags stop the copy; a resumed
+  copy reuses only artifacts whose digest matches.
+- The command verifies the destination and the source snapshot before it reports
+  success. It never deletes the source and does not need deletion credentials.
+- Destination preflight is also tag-scoped: an existing package may contain
+  untagged versions that OCI tag listing cannot detect. Use a new destination package
+  if the goal is to avoid carrying forward any existing destination residue.
+- It does not change configuration, the saved backend, or plan files, and it does not
+  call `-migrate-state`.
+
+After a successful copy, edit the backend `repository` literal in your configuration
+to the new repository and run:
+
+```sh
+gh tofu init -reconfigure
+```
+
+Then confirm the destination works, for example with `gh tofu plan`, before moving
+other writers. Package visibility and permissions are not part of the OCI copy and
+must be configured separately. OCI tags cannot show untagged package versions, so
+any untagged versions in the source are neither listed nor copied. Retiring the
+source package is a separate, explicitly authorized action.
+
 ## Data safety and limits
 
 The supported writer model for this backend, and how to recover after lost
