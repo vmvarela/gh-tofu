@@ -1,5 +1,5 @@
 diff --git a/go.mod b/go.mod
-index 29019c212..7fb409ad3 100644
+index 29019c212..c0f6e64f2 100644
 --- a/go.mod
 +++ b/go.mod
 @@ -20,7 +20,7 @@ require (
@@ -15,7 +15,7 @@ index 29019c212..7fb409ad3 100644
  	github.com/tencentyun/cos-go-sdk-v5 v0.7.70
  	github.com/ulikunitz/xz v0.5.16
  	github.com/urfave/cli/v3 v3.10.1
-+	github.com/vmvarela/oras-state v0.2.4-0.20261110155600-befb433646c3
++	github.com/vmvarela/oras-state v0.3.0
  	github.com/xanzy/ssh-agent v0.3.3
  	github.com/xlab/treeprint v1.2.0
  	github.com/zclconf/go-cty v1.19.0
@@ -67,7 +67,7 @@ index 29019c212..7fb409ad3 100644
  	google.golang.org/genproto v0.0.0-20260715232425-e75dac1f907d // indirect
  	google.golang.org/genproto/googleapis/api v0.0.0-20260803160001-6ac0973c030d // indirect
 diff --git a/go.sum b/go.sum
-index e87e6830c..7cde28af7 100644
+index e87e6830c..0a0a07c48 100644
 --- a/go.sum
 +++ b/go.sum
 @@ -51,8 +51,8 @@ github.com/AzureAD/microsoft-authentication-extensions-for-go/cache v0.1.1 h1:WJ
@@ -105,8 +105,8 @@ index e87e6830c..7cde28af7 100644
  github.com/vmihailenco/msgpack/v5 v5.3.5/go.mod h1:7xyJ9e+0+9SaZT0Wt1RGleJXzli6Q/V5KbhBonMG9jc=
  github.com/vmihailenco/tagparser/v2 v2.0.0 h1:y09buUbR+b5aycVFQs/g70pqKVZNBmxwAhO7/IwNM9g=
  github.com/vmihailenco/tagparser/v2 v2.0.0/go.mod h1:Wri+At7QHww0WTrCBeu4J6bNtoV6mEfg5OIWRZA9qds=
-+github.com/vmvarela/oras-state v0.2.4-0.20261110155600-befb433646c3 h1:2j0JOhuK/QIFQaqwu9YqP6zpAkvkmaPtCLr0vMAk23M=
-+github.com/vmvarela/oras-state v0.2.4-0.20261110155600-befb433646c3/go.mod h1:+TcvQMEdDN/+OU9Fn6azSzxCfcmGnFYXv1d7YKABEmo=
++github.com/vmvarela/oras-state v0.3.0 h1:eZCwJx08WZpr6ygGCeJUA52GSohhQziRr/dPBDBKeHQ=
++github.com/vmvarela/oras-state v0.3.0/go.mod h1:+TcvQMEdDN/+OU9Fn6azSzxCfcmGnFYXv1d7YKABEmo=
  github.com/x448/float16 v0.8.4 h1:qLwI1I70+NjRFUR3zs1JPUCgaCXSh3SW62uAKT1mSBM=
  github.com/x448/float16 v0.8.4/go.mod h1:14CWIYCyZA/cWjXOioeEpHeN/83MdbZDRQHoFcYsOfg=
  github.com/xanzy/ssh-agent v0.3.3 h1:+/15pJfg/RsTxqYcX6fHqOXZwwMP+2VyYWJeWM2qQFM=

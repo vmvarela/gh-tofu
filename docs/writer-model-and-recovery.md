@@ -119,7 +119,7 @@ old ones.
 
 ## Repository migration
 
-`tofu state compact` copies the configured state repository to a new repository.
+`gh tofu state compact` copies the configured state repository to a new repository.
 It does not rename a GHCR package, prune history, or change configuration. The
 copy is read-only for the source: it never deletes source artifacts, and it does
 not use package-deletion credentials.
@@ -131,7 +131,7 @@ not use package-deletion credentials.
    the source to detect changes, but that is detection, not compare-and-swap: a
    concurrent write can leave a partial destination or fail verification, and no
    consistent snapshot is guaranteed.
-2. **Plan.** Run `tofu state compact <registry>/<repository>` and read the source,
+2. **Plan.** Run `gh tofu state compact <registry>/<repository>` and read the source,
    destination, artifact and skipped counts. The destination must be on the same
    registry; on `ghcr.io` it must stay in the same owner. A destination with
    conflicting or unexpected tags is refused.
@@ -141,7 +141,7 @@ not use package-deletion credentials.
    the copy. It verifies the destination and source snapshot. A resumed
    run reuses only artifacts whose digest matches.
 4. **Reconfigure.** Edit the backend `repository` literal and run
-   `tofu init -reconfigure`. Do not use `-migrate-state`: this is a byte-preserving
+   `gh tofu init -reconfigure`. Do not use `-migrate-state`: this is a byte-preserving
    copy, and migration would re-serialize and possibly re-encrypt state.
 5. **Validate.** Confirm the destination with a plan or a read-only state command
    before allowing other writers to use it. Package visibility and permissions are
