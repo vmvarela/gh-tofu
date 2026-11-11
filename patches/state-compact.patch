@@ -238,7 +238,7 @@ diff --git a/internal/command/state_compact.go b/internal/command/state_compact.
 new file mode 100644
 --- /dev/null
 +++ b/internal/command/state_compact.go
-@@ -0,0 +1,179 @@
+@@ -0,0 +1,183 @@
 +package command
 +
 +import (
@@ -272,6 +272,10 @@ new file mode 100644
 +verification finish. A concurrent change is detected by re-inventory, but that
 +detection is not compare-and-swap: it cannot guarantee a consistent snapshot and
 +can leave a partial destination or fail verification.
++
++Only validated unlock markers are skipped, including GHCR's locked- aliases.
++Active, expired, or malformed lock artifacts block the copy; tag names alone
++do not prove that a lock is released.
 +
 +This command is a dry run by default. It never deletes the source, changes
 +configuration, the saved backend, or plan files, and it does not require

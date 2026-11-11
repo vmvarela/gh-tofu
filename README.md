@@ -253,8 +253,9 @@ or fail verification, and no consistent snapshot is guaranteed.
   must be on the same registry as the configured backend; for `ghcr.io` it must also
   stay in the same owner.
 - The copy includes every tagged state, history and unknown artifact, including
-  tags the backend does not recognize. `unlocked-` markers are skipped, and any
-  `locked-` tag makes the plan fail instead of being copied or bypassed.
+  tags the backend does not recognize. Validated unlock markers are skipped,
+  including GHCR's `locked-` aliases. Active, expired, or malformed lock artifacts
+  block the copy; a tag name alone never proves that a lock is released.
 - Before writing, the destination must be empty or already contain only the expected
   tags with matching digests. Conflicting or unexpected tags stop the copy; a resumed
   copy reuses only artifacts whose digest matches.

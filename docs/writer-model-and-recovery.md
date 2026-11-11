@@ -136,8 +136,9 @@ not use package-deletion credentials.
    registry; on `ghcr.io` it must stay in the same owner. A destination with
    conflicting or unexpected tags is refused.
 3. **Copy.** Run the same command with `-apply` while writers stay stopped. It
-   copies all tagged non-lock artifacts, skips `unlocked-` markers, refuses
-   `locked-` markers, and verifies the destination and source snapshot. A resumed
+   copies all tagged non-lock artifacts and skips only validated unlock markers,
+   including GHCR's `locked-` aliases. Active, expired, or malformed locks block
+   the copy. It verifies the destination and source snapshot. A resumed
    run reuses only artifacts whose digest matches.
 4. **Reconfigure.** Edit the backend `repository` literal and run
    `tofu init -reconfigure`. Do not use `-migrate-state`: this is a byte-preserving
