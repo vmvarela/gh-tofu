@@ -119,7 +119,7 @@ old ones.
 
 ## Repository migration
 
-`gh tofu state compact` copies the configured state repository to a new repository.
+`gh tofu oras copy` copies the configured state repository to a new repository.
 It does not rename a GHCR package, prune history, or change configuration. The
 copy is read-only for the source: it never deletes source artifacts, and it does
 not use package-deletion credentials.
@@ -131,7 +131,7 @@ not use package-deletion credentials.
    the source to detect changes, but that is detection, not compare-and-swap: a
    concurrent write can leave a partial destination or fail verification, and no
    consistent snapshot is guaranteed.
-2. **Plan.** Run `gh tofu state compact <registry>/<repository>` and read the source,
+2. **Plan.** Run `gh tofu oras copy <registry>/<repository>` and read the source,
    destination, artifact and skipped counts. The destination must be on the same
    registry; on `ghcr.io` it must stay in the same owner. A destination with
    conflicting or unexpected tags is refused.
@@ -150,7 +150,7 @@ not use package-deletion credentials.
    authorized action. Do it only after every consumer and credential path has moved
    and source writers are fenced; otherwise retain it.
 
-OCI tags cannot prove that a package has no untagged versions. `state compact`
+OCI tags cannot prove that a package has no untagged versions. `oras copy`
 neither lists nor copies untagged package versions, and GHCR does not prune them.
 
 ## Recovery

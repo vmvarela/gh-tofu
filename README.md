@@ -229,15 +229,15 @@ gh tofu history pull --output recovery.tfstate 3
 Backends without this capability return a clear error. History is read-only. Restore,
 per-version deletion and garbage collection are not provided.
 
-## State compaction and migration
+## Repository migration
 
-`state compact` copies the state repository to a new repository without deleting or
+`oras copy` copies the state repository to a new repository without deleting or
 changing the source. Use it to move state to a new package; it is not a history
 pruner and it does not rename a GHCR package.
 
 ```sh
-gh tofu state compact ghcr.io/my-org/infra-state-next
-gh tofu state compact -apply ghcr.io/my-org/infra-state-next
+gh tofu oras copy ghcr.io/my-org/infra-state-next
+gh tofu oras copy -apply ghcr.io/my-org/infra-state-next
 ```
 
 The first form is a dry run that reports the source, destination, artifact and
