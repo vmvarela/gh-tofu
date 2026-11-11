@@ -109,6 +109,18 @@ index 000000000..34e8acc9d
 +		})
 +	}
 +}
+diff --git a/internal/command/command.go b/internal/command/command.go
+index 88880294c..7247d78bd 100644
+--- a/internal/command/command.go
++++ b/internal/command/command.go
+@@ -408,6 +408,7 @@ func RootCommander(help *bool, ver *bool, chdir *string) Command {
+ 			WorkspaceCommander(false),
+ 			UnlockCommander(),
+ 			StateCommander(),
++			OrasCommander(),
+ 		},
+ 		Groups: []Group{MainCommandGroup, OtherCommandGroup},
+ 
 diff --git a/internal/command/oras_command.go b/internal/command/oras_command.go
 new file mode 100644
 index 000000000..6dabb3daf
@@ -303,10 +315,10 @@ index 000000000..d01ba2744
 +}
 diff --git a/internal/command/views/oras.go b/internal/command/views/oras.go
 new file mode 100644
-index 000000000..692609a95
+index 000000000..180e83467
 --- /dev/null
 +++ b/internal/command/views/oras.go
-@@ -0,0 +1,46 @@
+@@ -0,0 +1,48 @@
 +// Copyright (c) The OpenTofu Authors
 +// SPDX-License-Identifier: MPL-2.0
 +
@@ -348,8 +360,10 @@ index 000000000..692609a95
 +	}
 +
 +	action := "candidates"
++	count := len(report.Candidates)
 +	if apply {
 +		action = "deleted"
++		count = len(report.Deleted)
 +	}
-+	v.view.streams.Println(fmt.Sprintf("%d %s, %d tagged versions kept.", len(report.Candidates), action, report.KeptTagged))
++	v.view.streams.Println(fmt.Sprintf("%d %s, %d tagged versions kept.", count, action, report.KeptTagged))
 +}
