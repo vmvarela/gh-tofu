@@ -226,8 +226,30 @@ gh tofu history pull --output recovery.tfstate 3
 - `history pull` writes one version to a new file with mode `0600`. It never overwrites
   an existing file.
 
-Backends without this capability return a clear error. History is read-only. Restore,
-per-version deletion and garbage collection are not provided.
+Backends without this capability return a clear error. History is read-only. Restore and
+per-version deletion are not provided; the next section covers garbage collection on GHCR.
+
+## Purging unused GHCR package versions
+
+`ghcr.io` rejects OCI manifest deletion, so `max_versions` cannot prune anything there:
+every state write, lock and unlock leaves the previous package version untagged.
+`gh tofu oras purge` deletes those leftovers in place. The repository keeps its name, so
+there is no HCL change and no `init -reconfigure`.
+
+```sh
+gh tofu oras purge          # dry run: lists what would be deleted
+gh tofu oras purge -apply   # deletes the listed versions
+```
+
+Candidates are versions with no tags and older than ten minutes, plus retained history
+beyond `max_versions`. The command refuses to run while a lock is live, always keeps at
+least one tagged version (GHCR rejects deleting the last one), re-reads the live tag set
+right before deleting, and verifies the surviving state, marker and history manifests
+afterwards.
+
+It only works on `ghcr.io` and needs a token with `delete:packages` plus admin access to
+the package. A `plan`/`apply` token usually has neither, which is why purge is always
+explicit. Lock detection is cooperative: drain the writers before `-apply`.
 
 ## Data safety and limits
 

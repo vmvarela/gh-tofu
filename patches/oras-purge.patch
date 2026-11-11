@@ -1,0 +1,355 @@
+diff --git a/cmd/tofu/commands.go b/cmd/tofu/commands.go
+index 1085ddbf9..04e3b545e 100644
+--- a/cmd/tofu/commands.go
++++ b/cmd/tofu/commands.go
+@@ -251,6 +251,16 @@ func initCommands(meta command.Meta) {
+ 			}, nil
+ 		},
+ 
++		"oras": func() (cli.Command, error) {
++			return &command.OrasCommand{}, nil
++		},
++
++		"oras purge": func() (cli.Command, error) {
++			return &command.OrasPurgeCommand{
++				Meta: meta,
++			}, nil
++		},
++
+ 		"metadata functions": func() (cli.Command, error) {
+ 			return &command.MetadataFunctionsCommand{
+ 				Meta: meta,
+diff --git a/internal/backend/remote-state/oras/backend.go b/internal/backend/remote-state/oras/backend.go
+index 1d0005e36..2bef36dab 100644
+--- a/internal/backend/remote-state/oras/backend.go
++++ b/internal/backend/remote-state/oras/backend.go
+@@ -423,3 +423,12 @@ func (dockerCredentialHelperEnv) QueryDockerCredentialHelper(ctx context.Context
+ 	}
+ 	return result, nil
+ }
++
++// Purge deletes package versions that no tag references from the GHCR package
++// that stores this project's state. It only applies to ghcr.io.
++func (b *Backend) Purge(ctx context.Context, opts orasstate.PurgeOptions) (orasstate.PurgeReport, error) {
++	if b.client == nil {
++		return orasstate.PurgeReport{}, fmt.Errorf("backend is not configured")
++	}
++	return b.client.Purge(ctx, opts)
++}
+diff --git a/internal/command/arguments/oras_purge.go b/internal/command/arguments/oras_purge.go
+new file mode 100644
+index 000000000..4054a5a8e
+--- /dev/null
++++ b/internal/command/arguments/oras_purge.go
+@@ -0,0 +1,32 @@
++// Copyright (c) The OpenTofu Authors
++// SPDX-License-Identifier: MPL-2.0
++
++package arguments
++
++import (
++	"github.com/opentofu/opentofu/internal/tfdiags"
++)
++
++// OrasPurge represents the command-line arguments for the 'oras purge' command.
++type OrasPurge struct {
++	// Apply deletes the reported package versions instead of only listing them.
++	Apply bool
++}
++
++// BindOrasPurge registers the CLI arguments for 'oras purge'.
++func BindOrasPurge(cli *CommandLine) *OrasPurge {
++	ret := &OrasPurge{}
++	cli.BoolVar(&ret.Apply, "apply", false, "Delete the reported package versions instead of only listing them.")
++	return ret
++}
++
++// ParseOrasPurge processes CLI arguments, returning an OrasPurge value, a
++// closer function, and errors. If errors are encountered, an OrasPurge value
++// is still returned representing the best effort interpretation of the
++// arguments.
++func ParseOrasPurge(args []string) (*OrasPurge, func(), tfdiags.Diagnostics) {
++	cli := new(CommandLine)
++	ret := BindOrasPurge(cli)
++	closer, diags := cli.parseWithHooks("oras purge", args)
++	return ret, closer, diags
++}
+diff --git a/internal/command/arguments/oras_purge_test.go b/internal/command/arguments/oras_purge_test.go
+new file mode 100644
+index 000000000..34e8acc9d
+--- /dev/null
++++ b/internal/command/arguments/oras_purge_test.go
+@@ -0,0 +1,29 @@
++// Copyright (c) The OpenTofu Authors
++// SPDX-License-Identifier: MPL-2.0
++
++package arguments
++
++import "testing"
++
++func TestParseOrasPurge(t *testing.T) {
++	testCases := map[string]struct {
++		args []string
++		want bool
++	}{
++		"dry run by default": {args: nil, want: false},
++		"apply":              {args: []string{"-apply"}, want: true},
++	}
++
++	for name, tc := range testCases {
++		t.Run(name, func(t *testing.T) {
++			args, closer, diags := ParseOrasPurge(tc.args)
++			defer closer()
++			if diags.HasErrors() {
++				t.Fatalf("unexpected errors: %s", diags.Err())
++			}
++			if args.Apply != tc.want {
++				t.Fatalf("Apply = %v, want %v", args.Apply, tc.want)
++			}
++		})
++	}
++}
+diff --git a/internal/command/oras_command.go b/internal/command/oras_command.go
+new file mode 100644
+index 000000000..6dabb3daf
+--- /dev/null
++++ b/internal/command/oras_command.go
+@@ -0,0 +1,55 @@
++// Copyright (c) The OpenTofu Authors
++// SPDX-License-Identifier: MPL-2.0
++
++package command
++
++import (
++	"strings"
++
++	"github.com/mitchellh/cli"
++)
++
++// OrasCommander returns the "tofu oras" command group.
++func OrasCommander() Command {
++	cmd := Command{
++		Name:  "oras",
++		Short: "Manage state stored in an OCI registry",
++		Long: `Groups the commands that work on the OCI registry used by the oras
++backend.
++
++These commands talk to the registry directly, not through the state manager,
++so they never read or decrypt the state payload itself.`,
++		Commands: []Command{
++			OrasPurgeCommander(),
++		},
++	}
++
++	return cmd
++}
++
++// OrasCommand is the entry point of the "tofu oras" command group.
++type OrasCommand struct{}
++
++func (c *OrasCommand) Run(_ []string) int {
++	return cli.RunResultHelp
++}
++
++func (c *OrasCommand) Help() string {
++	helpText := `
++Usage: tofu [global options] oras <subcommand> [options] [args]
++
++  Manage state stored in an OCI registry.
++
++  This command has subcommands for working on the registry used by the oras
++  backend. Run "tofu oras <subcommand> -help" for details on a subcommand.
++
++Subcommands:
++
++  purge    Delete unused package versions from a GHCR repository.
++`
++	return strings.TrimSpace(helpText)
++}
++
++func (c *OrasCommand) Synopsis() string {
++	return "Manage state stored in an OCI registry"
++}
+diff --git a/internal/command/oras_purge.go b/internal/command/oras_purge.go
+new file mode 100644
+index 000000000..d01ba2744
+--- /dev/null
++++ b/internal/command/oras_purge.go
+@@ -0,0 +1,125 @@
++// Copyright (c) The OpenTofu Authors
++// SPDX-License-Identifier: MPL-2.0
++
++package command
++
++import (
++	"context"
++	"strings"
++
++	backendLocal "github.com/opentofu/opentofu/internal/backend/local"
++	"github.com/opentofu/opentofu/internal/command/arguments"
++	"github.com/opentofu/opentofu/internal/command/views"
++	"github.com/opentofu/opentofu/internal/encryption"
++	"github.com/opentofu/opentofu/internal/tfdiags"
++
++	orasstate "github.com/vmvarela/oras-state"
++)
++
++// orasPurgeBackend is the part of the oras backend that this command needs.
++type orasPurgeBackend interface {
++	Purge(ctx context.Context, opts orasstate.PurgeOptions) (orasstate.PurgeReport, error)
++}
++
++func OrasPurgeCommander() Command {
++	cmd := Command{
++		Name:  "purge",
++		Short: "Delete unused package versions from the configured GHCR repository",
++		Long: `Delete package versions that no live tag references, plus history beyond
++the configured max_versions, from the OCI repository used by the "oras" backend.
++
++ghcr.io rejects manifest deletion through the registry API, so this command uses
++the GitHub Packages API instead. It needs a token with the delete:packages scope
++and admin access to the package, which a normal plan or apply token does not have.
++
++It is a dry run unless -apply is given. It never deletes the last tagged version,
++refuses to run while a workspace lock is live, re-reads the live tag set before
++deleting, and verifies the surviving state after deleting.`,
++		DiagsWithNewline: true,
++	}
++
++	args := arguments.BindOrasPurge(&cmd.CommandLine)
++	cmd.Run = func(meta Meta) int {
++		return OrasPurgeCommand{Meta: meta}.Execute(args)
++	}
++
++	return cmd
++}
++
++// OrasPurgeCommand deletes unused package versions from an OCI repository.
++type OrasPurgeCommand struct {
++	Meta
++}
++
++func (c *OrasPurgeCommand) Run(rawArgs []string) int {
++	return RunCommand(OrasPurgeCommander(), c.Meta, rawArgs)
++}
++
++func (c OrasPurgeCommand) Execute(args *arguments.OrasPurge) int {
++	var diags tfdiags.Diagnostics
++	ctx := c.CommandContext()
++
++	b, backendDiags := c.Backend(ctx, nil, encryption.StateEncryptionDisabled())
++	diags = diags.Append(backendDiags)
++	if diags.HasErrors() {
++		c.View.Diagnostics(diags)
++		return 1
++	}
++
++	// The command layer wraps non-"enhanced" backends in the local backend, so
++	// the oras backend is reached through that wrapper.
++	var target any = b
++	if local, ok := b.(*backendLocal.Local); ok && local.Backend != nil {
++		target = local.Backend
++	}
++	purger, ok := target.(orasPurgeBackend)
++	if !ok {
++		diags = diags.Append(tfdiags.Sourceless(
++			tfdiags.Error,
++			"Unsupported backend",
++			"The oras purge command only supports the \"oras\" backend. Configure it in a backend block and run \"tofu init\".",
++		))
++		c.View.Diagnostics(diags)
++		return 1
++	}
++
++	report, err := purger.Purge(ctx, orasstate.PurgeOptions{Apply: args.Apply})
++	if err != nil {
++		diags = diags.Append(tfdiags.Sourceless(
++			tfdiags.Error,
++			"Failed to purge package versions",
++			err.Error(),
++		))
++		c.View.Diagnostics(diags)
++		return 1
++	}
++
++	views.NewOras(c.View).PurgeReport(report, args.Apply)
++	return 0
++}
++
++func (c *OrasPurgeCommand) Help() string {
++	helpText := `
++Usage: tofu [global options] oras purge [options]
++
++  Delete package versions that no live tag references, plus history beyond the
++  configured max_versions, from the OCI repository used by the "oras" backend.
++
++  ghcr.io rejects manifest deletion through the registry API, so this command
++  uses the GitHub Packages API instead. It requires a token with the
++  delete:packages scope and admin access to the package.
++
++  The command is a dry run unless -apply is given. It never deletes the last
++  tagged version of the package, and it refuses to run while a workspace lock
++  is live. Stop all plan and apply runs before using -apply.
++
++Options:
++
++  -apply          Delete the reported versions instead of only listing them.
++`
++	return strings.TrimSpace(helpText)
++}
++
++func (c *OrasPurgeCommand) Synopsis() string {
++	return "Delete unused package versions from the configured GHCR repository"
++}
+diff --git a/internal/command/views/oras.go b/internal/command/views/oras.go
+new file mode 100644
+index 000000000..692609a95
+--- /dev/null
++++ b/internal/command/views/oras.go
+@@ -0,0 +1,46 @@
++// Copyright (c) The OpenTofu Authors
++// SPDX-License-Identifier: MPL-2.0
++
++package views
++
++import (
++	"fmt"
++
++	orasstate "github.com/vmvarela/oras-state"
++)
++
++// Oras is the view for the "tofu oras" command family.
++type Oras struct {
++	view *View
++}
++
++func NewOras(view *View) *Oras {
++	return &Oras{view: view}
++}
++
++// PurgeReport prints the outcome of a purge run.
++func (v *Oras) PurgeReport(report orasstate.PurgeReport, apply bool) {
++	if !apply {
++		v.view.streams.Println("Dry run: nothing was deleted. Re-run with -apply to delete the versions listed below.")
++	}
++
++	for _, candidate := range report.Candidates {
++		v.view.streams.Printf("  version %d  %s  (%s)\n", candidate.VersionID, candidate.Digest, candidate.Reason)
++	}
++
++	if apply {
++		for _, deleted := range report.Deleted {
++			v.view.streams.Printf("deleted version %d  %s\n", deleted.VersionID, deleted.Digest)
++		}
++	}
++
++	for _, line := range report.Skipped {
++		v.view.streams.Printf("skipped: %s\n", line)
++	}
++
++	action := "candidates"
++	if apply {
++		action = "deleted"
++	}
++	v.view.streams.Println(fmt.Sprintf("%d %s, %d tagged versions kept.", len(report.Candidates), action, report.KeptTagged))
++}

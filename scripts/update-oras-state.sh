@@ -25,6 +25,7 @@ PATCHES=(
   "$ROOT/patches/backend.patch"
   "$ROOT/patches/history.patch"
   "$ROOT/patches/init-assistant.patch"
+  "$ROOT/patches/oras-purge.patch"
 )
 
 git clone --quiet --filter=blob:none https://github.com/opentofu/opentofu.git "$SRC"

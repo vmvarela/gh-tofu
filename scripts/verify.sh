@@ -18,6 +18,7 @@ PATCHES=(
   "$ROOT/patches/backend.patch"
   "$ROOT/patches/history.patch"
   "$ROOT/patches/init-assistant.patch"
+  "$ROOT/patches/oras-purge.patch"
 )
 
 for patch in "${PATCHES[@]}"; do
