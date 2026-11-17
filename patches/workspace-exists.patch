@@ -1,0 +1,395 @@
+diff --git a/internal/backend/backend.go b/internal/backend/backend.go
+index 9291bcd09..dacf5cd86 100644
+--- a/internal/backend/backend.go
++++ b/internal/backend/backend.go
+@@ -14,6 +14,7 @@ import (
+ 	"errors"
+ 	"log"
+ 	"os"
++	"slices"
+ 
+ 	"github.com/mitchellh/go-homedir"
+ 	"github.com/opentofu/svchost"
+@@ -123,6 +124,32 @@ type Backend interface {
+ 	Workspaces(context.Context) ([]string, error)
+ }
+ 
++// WorkspaceExistence is an optional interface a Backend may implement to
++// check for a single workspace without listing them all.
++type WorkspaceExistence interface {
++	// WorkspaceExists reports whether a workspace with the given name exists
++	// in the backend.
++	WorkspaceExists(ctx context.Context, name string) (bool, error)
++}
++
++// WorkspaceExists reports whether a workspace with the given name exists in
++// b. It uses the backend's direct per-workspace lookup when b implements
++// [WorkspaceExistence] and that lookup succeeds, and falls back to listing
++// all workspaces otherwise.
++func WorkspaceExists(ctx context.Context, b Backend, name string) (bool, error) {
++	if checker, ok := b.(WorkspaceExistence); ok {
++		if exists, err := checker.WorkspaceExists(ctx, name); err == nil {
++			return exists, nil
++		}
++		// A failed direct lookup behaves like the listing below.
++	}
++	workspaces, err := b.Workspaces(ctx)
++	if err != nil {
++		return false, err
++	}
++	return slices.Contains(workspaces, name), nil
++}
++
+ // HostAlias describes a list of aliases that should be used when initializing an
+ // Enhanced Backend
+ type HostAlias struct {
+diff --git a/internal/backend/local/backend.go b/internal/backend/local/backend.go
+index f83f15159..71c784da5 100644
+--- a/internal/backend/local/backend.go
++++ b/internal/backend/local/backend.go
+@@ -12,6 +12,7 @@ import (
+ 	"log"
+ 	"os"
+ 	"path/filepath"
++	"slices"
+ 	"sort"
+ 	"sync"
+ 
+@@ -225,6 +226,19 @@ func (b *Local) Workspaces(ctx context.Context) ([]string, error) {
+ 	return envs, nil
+ }
+ 
++// WorkspaceExists reports whether a workspace with the given name exists,
++// using the wrapped backend's direct lookup when it has one.
++func (b *Local) WorkspaceExists(ctx context.Context, name string) (bool, error) {
++	if b.Backend != nil {
++		return backend.WorkspaceExists(ctx, b.Backend, name)
++	}
++	workspaces, err := b.Workspaces(ctx)
++	if err != nil {
++		return false, err
++	}
++	return slices.Contains(workspaces, name), nil
++}
++
+ // DeleteWorkspace removes a workspace.
+ //
+ // The "default" workspace cannot be removed.
+diff --git a/internal/backend/remote-state/oras/backend.go b/internal/backend/remote-state/oras/backend.go
+index 2bef36dab..66650ad58 100644
+--- a/internal/backend/remote-state/oras/backend.go
++++ b/internal/backend/remote-state/oras/backend.go
+@@ -326,6 +326,21 @@ func (b *Backend) Workspaces(ctx context.Context) ([]string, error) {
+ 	return workspaces, nil
+ }
+ 
++// WorkspaceExists reports whether a workspace with the given name exists via
++// the client's direct lookup; callers fall back to listing if it fails.
++func (b *Backend) WorkspaceExists(ctx context.Context, name string) (bool, error) {
++	if b.client == nil {
++		return false, fmt.Errorf("backend is not configured")
++	}
++	if name == backend.DefaultStateName {
++		// Workspaces always synthesizes the default workspace, so the direct
++		// lookup must agree even when the registry layout has no default
++		// marker; otherwise init/select would treat it as absent.
++		return true, nil
++	}
++	return b.client.WorkspaceExists(ctx, name)
++}
++
+ func (b *Backend) DeleteWorkspace(ctx context.Context, name string, _ bool) error {
+ 	if b.client == nil {
+ 		return fmt.Errorf("backend is not configured")
+diff --git a/internal/backend/remote-state/oras/workspace_exists_test.go b/internal/backend/remote-state/oras/workspace_exists_test.go
+new file mode 100644
+index 000000000..f13c8e7f0
+--- /dev/null
++++ b/internal/backend/remote-state/oras/workspace_exists_test.go
+@@ -0,0 +1,42 @@
++package oras
++
++import (
++	"context"
++	"testing"
++
++	orasstate "github.com/vmvarela/oras-state"
++
++	"github.com/opentofu/opentofu/internal/backend"
++)
++
++var _ backend.WorkspaceExistence = (*Backend)(nil)
++
++// Compile-time proof that the pinned oras-state client provides the direct
++// lookup Backend.WorkspaceExists calls.
++var _ interface {
++	WorkspaceExists(context.Context, string) (bool, error)
++} = (*orasstate.Client)(nil)
++
++// An unconfigured backend must fail the check instead of pretending the
++// workspace is absent.
++func TestWorkspaceExists_UnconfiguredBackend(t *testing.T) {
++	b := &Backend{}
++	exists, err := b.WorkspaceExists(t.Context(), "default")
++	if err == nil {
++		t.Fatalf("expected an error from an unconfigured backend, got exists=%v", exists)
++	}
++}
++
++// Workspaces always appends the default workspace, so the direct lookup must
++// report it as existing without consulting the registry layout (a per-name
++// prober mirroring List would say false once other named workspaces exist).
++func TestWorkspaceExists_DefaultIsSynthetic(t *testing.T) {
++	b := &Backend{client: &orasstate.Client{}}
++	exists, err := b.WorkspaceExists(t.Context(), backend.DefaultStateName)
++	if err != nil {
++		t.Fatalf("checking the default workspace failed: %v", err)
++	}
++	if !exists {
++		t.Fatal("default workspace must be reported as existing")
++	}
++}
+diff --git a/internal/command/meta_backend.go b/internal/command/meta_backend.go
+index 848d75c3e..60bf40287 100644
+--- a/internal/command/meta_backend.go
++++ b/internal/command/meta_backend.go
+@@ -231,6 +231,21 @@ func (m *Meta) Backend(ctx context.Context, opts *BackendOpts, enc encryption.St
+ // if the currently selected workspace is valid. If not, it will ask
+ // the user to select a workspace from the list.
+ func (m *Meta) selectWorkspace(ctx context.Context, b backend.Backend) error {
++	// A backend that can check a single workspace directly lets us skip the
++	// listing entirely when the current selection exists.
++	if checker, ok := b.(backend.WorkspaceExistence); ok {
++		workspace, err := m.Workspace(ctx)
++		if err != nil {
++			return err
++		}
++		if exists, err := checker.WorkspaceExists(ctx, workspace); err == nil && exists {
++			log.Printf("[TRACE] Meta.selectWorkspace: the currently selected workspace is present in the configured backend (%s)", workspace)
++			return nil
++		}
++		// The selection is absent (or the check failed): fall through to the
++		// listing below, preserving the single-workspace and prompt behaviors.
++	}
++
+ 	workspaces, err := b.Workspaces(ctx)
+ 	if err == backend.ErrWorkspacesNotSupported {
+ 		return nil
+diff --git a/internal/command/workspace_exists_test.go b/internal/command/workspace_exists_test.go
+new file mode 100644
+index 000000000..c2bebd431
+--- /dev/null
++++ b/internal/command/workspace_exists_test.go
+@@ -0,0 +1,179 @@
++package command
++
++import (
++	"context"
++	"fmt"
++	"os"
++	"path/filepath"
++	"strings"
++	"testing"
++
++	"github.com/opentofu/opentofu/internal/backend"
++	backendInit "github.com/opentofu/opentofu/internal/backend/init"
++	"github.com/opentofu/opentofu/internal/command/workdir"
++	"github.com/opentofu/opentofu/internal/encryption"
++	"github.com/opentofu/opentofu/internal/states/statemgr"
++)
++
++// probeBackend adds the optional direct workspace lookup to MockBackend so the
++// tests can see whether a command probes one workspace or lists them all.
++type probeBackend struct {
++	*backendInit.MockBackend
++	existsFn    func(name string) bool
++	existsCalls []string
++}
++
++func (b *probeBackend) WorkspaceExists(_ context.Context, name string) (bool, error) {
++	b.existsCalls = append(b.existsCalls, name)
++	if b.existsFn != nil {
++		return b.existsFn(name), nil
++	}
++	return true, nil
++}
++
++// testWorkspaceExistenceBackend registers b under a temporary backend name
++// and points the working directory at a minimal configuration using it.
++func testWorkspaceExistenceBackend(t *testing.T, name string, b backend.Backend) Meta {
++	t.Helper()
++	td := t.TempDir()
++	if err := os.WriteFile(filepath.Join(td, "main.tf"), []byte(fmt.Sprintf("terraform {\n  backend %q {}\n}\n", name)), 0644); err != nil {
++		t.Fatal(err)
++	}
++	t.Chdir(td)
++
++	// init refreshes state through the backend, so give the mock a real
++	// filesystem-backed state manager.
++	var mock *backendInit.MockBackend
++	switch f := b.(type) {
++	case *backendInit.MockBackend:
++		mock = f
++	case *probeBackend:
++		mock = f.MockBackend
++	}
++	t.Cleanup(backendInit.RegisterTemp(name, func(enc encryption.StateEncryption) backend.Backend {
++		if mock != nil && mock.StateMgrFn == nil {
++			mock.StateMgrFn = func(workspace string) (statemgr.Full, error) {
++				return statemgr.NewFilesystem(filepath.Join(td, "state", workspace), enc), nil
++			}
++		}
++		return b
++	}))
++
++	return Meta{
++		WorkingDir:       workdir.NewDir("."),
++		testingOverrides: metaOverridesForProvider(testProvider()),
++	}
++}
++
++// When the backend offers a direct lookup, `workspace select` must use it and
++// never fall back to listing every workspace.
++func TestWorkspaceSelect_UsesDirectLookup(t *testing.T) {
++	fake := &probeBackend{MockBackend: &backendInit.MockBackend{
++		WorkspacesFn: func() ([]string, error) {
++			return []string{backend.DefaultStateName}, nil
++		},
++	}}
++	meta := testWorkspaceExistenceBackend(t, "_exists_direct", fake)
++
++	view, done := testView(t)
++	meta.View = view
++	code := RunCommander(t, InitCommander(), meta, []string{"-input=false"})
++	out := done(t)
++	if code != 0 {
++		t.Fatalf("init failed with code %d: %s", code, out.Stderr())
++	}
++	if fake.MockBackend.WorkspacesCalled {
++		t.Fatal("init listed workspaces even though the backend supports a direct lookup")
++	}
++
++	view, done = testView(t)
++	meta.View = view
++	code = RunCommander(t, WorkspaceSelectCommander(false), meta, []string{"prod"})
++	out = done(t)
++	if code != 0 {
++		t.Fatalf("select failed with code %d: %s", code, out.Stderr())
++	}
++	if fake.MockBackend.WorkspacesCalled {
++		t.Fatal("workspace select listed workspaces even though the backend supports a direct lookup")
++	}
++	probed := false
++	for _, name := range fake.existsCalls {
++		if name == "prod" {
++			probed = true
++		}
++	}
++	if !probed {
++		t.Fatalf("direct lookup never checked workspace %q; calls: %v", "prod", fake.existsCalls)
++	}
++}
++
++// A backend without the optional lookup keeps the listing behavior.
++func TestWorkspaceSelect_FallsBackToListing(t *testing.T) {
++	fake := &backendInit.MockBackend{
++		WorkspacesFn: func() ([]string, error) {
++			return []string{backend.DefaultStateName, "prod"}, nil
++		},
++	}
++	meta := testWorkspaceExistenceBackend(t, "_exists_list", fake)
++
++	view, done := testView(t)
++	meta.View = view
++	code := RunCommander(t, InitCommander(), meta, []string{"-input=false"})
++	out := done(t)
++	if code != 0 {
++		t.Fatalf("init failed with code %d: %s", code, out.Stderr())
++	}
++	if !fake.WorkspacesCalled {
++		t.Fatal("init did not list workspaces even though the backend has no direct lookup")
++	}
++
++	fake.WorkspacesCalled = false
++	view, done = testView(t)
++	meta.View = view
++	code = RunCommander(t, WorkspaceSelectCommander(false), meta, []string{"prod"})
++	out = done(t)
++	if code != 0 {
++		t.Fatalf("select failed with code %d: %s", code, out.Stderr())
++	}
++	if !fake.WorkspacesCalled {
++		t.Fatal("workspace select did not list workspaces even though the backend has no direct lookup")
++	}
++}
++
++// An unknown current selection during init must still list the workspaces and
++// report the absence, exactly as before.
++func TestInit_UnknownSelectionStillLists(t *testing.T) {
++	fake := &probeBackend{
++		MockBackend: &backendInit.MockBackend{
++			WorkspacesFn: func() ([]string, error) {
++				return []string{backend.DefaultStateName, "prod"}, nil
++			},
++		},
++		existsFn: func(string) bool { return false },
++	}
++	t.Setenv("TF_WORKSPACE", "ghost")
++	meta := testWorkspaceExistenceBackend(t, "_exists_ghost", fake)
++
++	view, done := testView(t)
++	meta.View = view
++	code := RunCommander(t, InitCommander(), meta, []string{"-input=false"})
++	out := done(t)
++	if code == 0 {
++		t.Fatal("init succeeded even though the selected workspace does not exist")
++	}
++	if !fake.MockBackend.WorkspacesCalled {
++		t.Fatal("init did not list workspaces for the absent selection")
++	}
++	probed := false
++	for _, name := range fake.existsCalls {
++		if name == "ghost" {
++			probed = true
++		}
++	}
++	if !probed {
++		t.Fatalf("direct lookup never checked workspace %q; calls: %v", "ghost", fake.existsCalls)
++	}
++	if !strings.Contains(out.Stderr(), `Currently selected workspace "ghost" does not exist`) {
++		t.Fatalf("unexpected diagnostics: %s", out.Stderr())
++	}
++}
+diff --git a/internal/command/workspace_select.go b/internal/command/workspace_select.go
+index cd2883a73..786d4f953 100644
+--- a/internal/command/workspace_select.go
++++ b/internal/command/workspace_select.go
+@@ -7,9 +7,9 @@ package command
+ 
+ import (
+ 	"fmt"
+-	"slices"
+ 	"strings"
+ 
++	"github.com/opentofu/opentofu/internal/backend"
+ 	"github.com/opentofu/opentofu/internal/command/arguments"
+ 	"github.com/opentofu/opentofu/internal/command/views"
+ 	"github.com/opentofu/opentofu/internal/tfdiags"
+@@ -97,7 +97,7 @@ func (c WorkspaceSelectCommand) Execute(args *arguments.WorkspaceSelect, view vi
+ 		return 1
+ 	}
+ 
+-	states, err := b.Workspaces(ctx)
++	found, err := backend.WorkspaceExists(ctx, b, name)
+ 	if err != nil {
+ 		view.Diagnostics(tfdiags.Diagnostics{tfdiags.Sourceless(
+ 			tfdiags.Error,
+@@ -112,8 +112,6 @@ func (c WorkspaceSelectCommand) Execute(args *arguments.WorkspaceSelect, view vi
+ 		return 0
+ 	}
+ 
+-	found := slices.Contains(states, name)
+-
+ 	var newState bool
+ 
+ 	if !found {
