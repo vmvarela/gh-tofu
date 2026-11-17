@@ -10,6 +10,7 @@ PATCHES=(
   "$ROOT/patches/history.patch"
   "$ROOT/patches/init-assistant.patch"
   "$ROOT/patches/oras-purge.patch"
+  "$ROOT/patches/workspace-exists.patch"
 )
 
 for patch in "${PATCHES[@]}"; do
